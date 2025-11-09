@@ -19,7 +19,11 @@ serve(async (req) => {
       throw new Error('LOVABLE_API_KEY is not configured');
     }
 
-    const prompt = `Search the internet and find 6 real places (restaurants, activities, attractions) within ${radius} miles of ${startAddress}. 
+    // Determine number of recommendations based on input specificity
+    const hasSpecificPreferences = (activities && activities.length > 20) || (foodPreferences && foodPreferences.length > 20);
+    const recommendationCount = hasSpecificPreferences ? 8 : 12;
+
+    const prompt = `Search the internet and find ${recommendationCount} real places (restaurants, activities, attractions) within ${radius} miles of ${startAddress}.
     
 User preferences:
 - Starting from: ${startAddress}

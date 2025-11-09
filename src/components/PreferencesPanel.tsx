@@ -1,30 +1,50 @@
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Slider } from "@/components/ui/slider";
 import { MapPin, Activity, UtensilsCrossed } from "lucide-react";
 import { Place } from "@/types/place";
 import { toast } from "sonner";
+import AddressAutocomplete from "./AddressAutocomplete";
 
 interface PreferencesPanelProps {
-  onRecommendationsGenerated: (places: Place[]) => void;
+  onRecommendationsGenerated: (places: Place[], sessionId?: string, sessionCode?: string) => void;
+  onCreateSession?: (preferences: {
+    startAddress: string;
+    radius: number;
+    activities: string;
+    foodPreferences: string;
+  }) => Promise<void>;
+  sessionMode?: boolean;
 }
 
-const PreferencesPanel = ({ onRecommendationsGenerated }: PreferencesPanelProps) => {
+const PreferencesPanel = ({ onRecommendationsGenerated, onCreateSession, sessionMode = false }: PreferencesPanelProps) => {
   const [startAddress, setStartAddress] = useState("");
   const [radius, setRadius] = useState(10);
   const [activities, setActivities] = useState("");
   const [foodPreferences, setFoodPreferences] = useState("");
+  const [isGenerating, setIsGenerating] = useState(false);
 
   const handleGenerate = async () => {
     if (!startAddress) {
-      toast.error("Please enter a starting address");
+      toast.error("Please enter a complete address");
       return;
     }
 
+    setIsGenerating(true);
     try {
+      // If in session mode, use the onCreateSession callback
+      if (sessionMode && onCreateSession) {
+        await onCreateSession({
+          startAddress,
+          radius,
+          activities,
+          foodPreferences,
+        });
+        return;
+      }
+
       const response = await fetch(
         `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/generate-recommendations`,
         {
@@ -53,6 +73,8 @@ const PreferencesPanel = ({ onRecommendationsGenerated }: PreferencesPanelProps)
     } catch (error) {
       console.error('Error generating recommendations:', error);
       toast.error(error instanceof Error ? error.message : "Failed to generate recommendations");
+    } finally {
+      setIsGenerating(false);
     }
   };
 
@@ -70,15 +92,14 @@ const PreferencesPanel = ({ onRecommendationsGenerated }: PreferencesPanelProps)
               <MapPin className="w-4 h-4" />
               Start Address
             </Label>
-            <Input
-              id="address"
-              placeholder="Enter your starting address"
+            <AddressAutocomplete
               value={startAddress}
-              onChange={(e) => setStartAddress(e.target.value)}
-              className="bg-background"
+              onChange={setStartAddress}
+              onSelect={setStartAddress}
+              placeholder="Enter your starting address"
             />
             <p className="text-xs text-muted-foreground">
-              Enter your starting location or address
+              Select a complete address from the suggestions
             </p>
           </div>
 
@@ -136,10 +157,11 @@ const PreferencesPanel = ({ onRecommendationsGenerated }: PreferencesPanelProps)
 
           <Button 
             onClick={handleGenerate}
+            disabled={isGenerating}
             className="w-full bg-foreground text-background hover:bg-foreground/90"
             size="lg"
           >
-            Generate Recommendations
+            {isGenerating ? "Generating..." : sessionMode ? "Create Session" : "Generate Recommendations"}
           </Button>
         </div>
       </div>
