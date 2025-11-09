@@ -11,18 +11,19 @@ serve(async (req) => {
   }
 
   try {
-    const { startAddress, location, activities, foodPreferences } = await req.json();
-    console.log('Generating recommendations for:', { startAddress, location, activities, foodPreferences });
+    const { startAddress, radius, activities, foodPreferences } = await req.json();
+    console.log('Generating recommendations for:', { startAddress, radius, activities, foodPreferences });
 
     const LOVABLE_API_KEY = Deno.env.get('LOVABLE_API_KEY');
     if (!LOVABLE_API_KEY) {
       throw new Error('LOVABLE_API_KEY is not configured');
     }
 
-    const prompt = `Search the internet and find 6 real places (restaurants, activities, attractions) in or near ${location}. 
+    const prompt = `Search the internet and find 6 real places (restaurants, activities, attractions) within ${radius} miles of ${startAddress}. 
     
 User preferences:
 - Starting from: ${startAddress}
+- Search radius: ${radius} miles
 - Activities interested in: ${activities || 'any activities'}
 - Food preferences: ${foodPreferences || 'any cuisine'}
 
@@ -34,7 +35,7 @@ For each place, provide:
 5. Full address
 6. 3 key highlights
 
-Make sure these are REAL places that exist in ${location}. Search the internet to verify they exist and get accurate information.
+Make sure these are REAL places that exist within ${radius} miles of ${startAddress}. Search the internet to verify they exist and get accurate information.
 
 Return ONLY a valid JSON array with this exact structure, no additional text:
 [

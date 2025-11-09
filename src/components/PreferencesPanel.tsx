@@ -3,6 +3,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
+import { Slider } from "@/components/ui/slider";
 import { MapPin, Activity, UtensilsCrossed } from "lucide-react";
 import { Place } from "@/types/place";
 import { toast } from "sonner";
@@ -13,13 +14,13 @@ interface PreferencesPanelProps {
 
 const PreferencesPanel = ({ onRecommendationsGenerated }: PreferencesPanelProps) => {
   const [startAddress, setStartAddress] = useState("");
-  const [location, setLocation] = useState("");
+  const [radius, setRadius] = useState(10);
   const [activities, setActivities] = useState("");
   const [foodPreferences, setFoodPreferences] = useState("");
 
   const handleGenerate = async () => {
-    if (!startAddress || !location) {
-      toast.error("Please enter at least a starting address and location");
+    if (!startAddress) {
+      toast.error("Please enter a starting address");
       return;
     }
 
@@ -34,7 +35,7 @@ const PreferencesPanel = ({ onRecommendationsGenerated }: PreferencesPanelProps)
           },
           body: JSON.stringify({
             startAddress,
-            location,
+            radius,
             activities,
             foodPreferences,
           }),
@@ -82,16 +83,20 @@ const PreferencesPanel = ({ onRecommendationsGenerated }: PreferencesPanelProps)
           </div>
 
           <div className="space-y-2">
-            <Label htmlFor="location" className="text-sm font-medium">Location</Label>
-            <Input
-              id="location"
-              placeholder="e.g., Flower Mound, TX"
-              value={location}
-              onChange={(e) => setLocation(e.target.value)}
-              className="bg-background"
+            <Label htmlFor="radius" className="text-sm font-medium">
+              Search Radius: {radius} miles
+            </Label>
+            <Slider
+              id="radius"
+              value={[radius]}
+              onValueChange={(value) => setRadius(value[0])}
+              min={5}
+              max={50}
+              step={5}
+              className="w-full"
             />
             <p className="text-xs text-muted-foreground">
-              Search destination location for results
+              Find places within {radius} miles of your starting address
             </p>
           </div>
 
