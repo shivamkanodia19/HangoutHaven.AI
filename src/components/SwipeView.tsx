@@ -21,7 +21,7 @@ interface Match {
   place_id: string;
   place_data: Place;
   is_final_choice: boolean;
-  like_count?: number;
+  like_count: number;
 }
 
 const SwipeView = ({ sessionId, sessionCode, recommendations, onBack }: SwipeViewProps) => {
@@ -34,6 +34,7 @@ const SwipeView = ({ sessionId, sessionCode, recommendations, onBack }: SwipeVie
   const [participantCount, setParticipantCount] = useState(0);
   const [isVoteMode, setIsVoteMode] = useState(false);
   const [gameEnded, setGameEnded] = useState(false);
+  const [swipeCounts, setSwipeCounts] = useState<Record<string, number>>({});
 
   // Load participant count
   useEffect(() => {
@@ -55,11 +56,12 @@ const SwipeView = ({ sessionId, sessionCode, recommendations, onBack }: SwipeVie
 
     checkRoundCompletion();
   }, [currentIndex, deck.length, participantCount]);
-  // Load Round 1 unanimous matches
+  // Load Round 1 unanimous matches and subscribe to real-time updates
   useEffect(() => {
     loadMatches();
+    subscribeToSwipes();
 
-    const channel = supabase
+    const matchChannel = supabase
       .channel(`session_matches_${sessionId}`)
       .on(
         'postgres_changes',
@@ -71,16 +73,79 @@ const SwipeView = ({ sessionId, sessionCode, recommendations, onBack }: SwipeVie
         },
         (payload) => {
           const newMatch = payload.new as Match;
-          setAllMatches((prev) => [...prev, newMatch]);
+          loadMatches(); // Reload all matches to get accurate like counts
           toast.success(`🎉 It's a match! ${newMatch.place_data.name}`);
+        }
+      )
+      .on(
+        'postgres_changes',
+        {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'session_matches',
+          filter: `session_id=eq.${sessionId}`,
+        },
+        () => {
+          loadMatches(); // Reload when matches are updated
         }
       )
       .subscribe();
 
     return () => {
-      supabase.removeChannel(channel);
+      supabase.removeChannel(matchChannel);
     };
   }, [sessionId]);
+
+  const subscribeToSwipes = () => {
+    const swipeChannel = supabase
+      .channel(`session_swipes_${sessionId}`)
+      .on(
+        'postgres_changes',
+        {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'session_swipes',
+          filter: `session_id=eq.${sessionId}`,
+        },
+        () => {
+          // Reload swipe counts when anyone swipes
+          loadSwipeCounts();
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(swipeChannel);
+    };
+  };
+
+  const loadSwipeCounts = async () => {
+    const placeIds = deck.map(p => p.id);
+    
+    const { data: swipes } = await supabase
+      .from('session_swipes')
+      .select('place_id, user_id')
+      .eq('session_id', sessionId)
+      .eq('direction', 'right')
+      .in('place_id', placeIds);
+
+    if (swipes) {
+      const counts: Record<string, Set<string>> = {};
+      swipes.forEach(swipe => {
+        if (!counts[swipe.place_id]) {
+          counts[swipe.place_id] = new Set();
+        }
+        counts[swipe.place_id].add(swipe.user_id);
+      });
+
+      const swipeCountsMap: Record<string, number> = {};
+      Object.keys(counts).forEach(placeId => {
+        swipeCountsMap[placeId] = counts[placeId].size;
+      });
+
+      setSwipeCounts(swipeCountsMap);
+    }
+  };
 
   const loadMatches = async () => {
     const { data, error } = await supabase
@@ -89,12 +154,25 @@ const SwipeView = ({ sessionId, sessionCode, recommendations, onBack }: SwipeVie
       .eq('session_id', sessionId);
 
     if (!error && data) {
-      const typedMatches = data.map((match) => ({
-        ...match,
-        place_data: match.place_data as unknown as Place,
-      }));
+      // Load like counts for each match
+      const matchesWithCounts = await Promise.all(
+        data.map(async (match) => {
+          const { count } = await supabase
+            .from('session_swipes')
+            .select('*', { count: 'exact', head: true })
+            .eq('session_id', sessionId)
+            .eq('place_id', match.place_id)
+            .eq('direction', 'right');
+
+          return {
+            ...match,
+            place_data: match.place_data as unknown as Place,
+            like_count: count || 0,
+          };
+        })
+      );
       
-      setAllMatches(typedMatches as any);
+      setAllMatches(matchesWithCounts as Match[]);
     }
   };
 
@@ -109,6 +187,23 @@ const SwipeView = ({ sessionId, sessionCode, recommendations, onBack }: SwipeVie
       .in('place_id', placeIds);
 
     if (!swipes) return;
+
+    // Check if ALL participants have swiped on ALL places in the deck
+    const swipesByUser: Record<string, Set<string>> = {};
+    swipes.forEach(swipe => {
+      if (!swipesByUser[swipe.user_id]) {
+        swipesByUser[swipe.user_id] = new Set();
+      }
+      swipesByUser[swipe.user_id].add(swipe.place_id);
+    });
+
+    const allParticipantsCompleted = Object.keys(swipesByUser).length === participantCount &&
+      Object.values(swipesByUser).every(placeSet => placeSet.size === placeIds.length);
+
+    if (!allParticipantsCompleted) {
+      // Not everyone has finished swiping yet
+      return;
+    }
 
     // Group by place_id and count right swipes
     const likeCounts: Record<string, number> = {};
@@ -157,6 +252,21 @@ const SwipeView = ({ sessionId, sessionCode, recommendations, onBack }: SwipeVie
     try {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) throw new Error("Not authenticated");
+
+      // Check if swipe already exists
+      const { data: existingSwipe } = await supabase
+        .from('session_swipes')
+        .select('id')
+        .eq('session_id', sessionId)
+        .eq('user_id', user.id)
+        .eq('place_id', place.id)
+        .single();
+
+      if (existingSwipe) {
+        // Already swiped, just move to next
+        setCurrentIndex((prev) => prev + 1);
+        return;
+      }
 
       await supabase
         .from('session_swipes')
@@ -323,7 +433,7 @@ const SwipeView = ({ sessionId, sessionCode, recommendations, onBack }: SwipeVie
       )}
 
       {/* Show Round 1 unanimous matches */}
-      {allMatches.length > 0 && round === 1 && (
+      {allMatches.length > 0 && (
         <Card className="max-w-md mx-auto border-primary">
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
@@ -344,12 +454,18 @@ const SwipeView = ({ sessionId, sessionCode, recommendations, onBack }: SwipeVie
                   <p className="font-medium">{match.place_data.name}</p>
                   <p className="text-sm text-muted-foreground">{match.place_data.type}</p>
                 </div>
-                {match.is_final_choice && (
-                  <Badge variant="default">
-                    <PartyPopper className="w-3 h-3 mr-1" />
-                    Winner
+                <div className="flex items-center gap-2">
+                  <Badge variant="secondary">
+                    <Heart className="w-3 h-3 mr-1" />
+                    {match.like_count}/{participantCount}
                   </Badge>
-                )}
+                  {match.is_final_choice && (
+                    <Badge variant="default">
+                      <PartyPopper className="w-3 h-3 mr-1" />
+                      Winner
+                    </Badge>
+                  )}
+                </div>
               </div>
             ))}
           </CardContent>
@@ -362,10 +478,12 @@ const SwipeView = ({ sessionId, sessionCode, recommendations, onBack }: SwipeVie
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
               <Sparkles className="w-5 h-5 text-primary" />
-              Advancing to Round {round + 1} ({currentRoundCandidates.length})
+              {allMatches.length > 0 ? "Waiting for All Participants..." : `Advancing to Round ${round + 1} (${currentRoundCandidates.length})`}
             </CardTitle>
             <CardDescription>
-              Places that received likes this round
+              {allMatches.length > 0 
+                ? "Everyone needs to finish swiping before moving to the next round"
+                : "Places that received likes this round"}
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-2">
@@ -378,6 +496,10 @@ const SwipeView = ({ sessionId, sessionCode, recommendations, onBack }: SwipeVie
                   <p className="font-medium">{place.name}</p>
                   <p className="text-sm text-muted-foreground">{place.type}</p>
                 </div>
+                <Badge variant="secondary">
+                  <Heart className="w-3 h-3 mr-1" />
+                  {swipeCounts[place.id] || 0}/{participantCount}
+                </Badge>
               </div>
             ))}
           </CardContent>
