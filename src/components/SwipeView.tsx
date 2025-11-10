@@ -26,7 +26,8 @@ const SwipeView = ({ sessionId, sessionCode, recommendations, onBack }: SwipeVie
   const [currentIndex, setCurrentIndex] = useState(0);
   const [matches, setMatches] = useState<Match[]>([]);
   const [isLoading, setIsLoading] = useState(false);
-
+  const [round, setRound] = useState<1 | 2>(1);
+  const [deck, setDeck] = useState<Place[]>(recommendations);
   useEffect(() => {
     loadMatches();
 

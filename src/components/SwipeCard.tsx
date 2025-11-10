@@ -32,7 +32,7 @@ const SwipeCard = ({ place, onSwipeLeft, onSwipeRight }: SwipeCardProps) => {
 
   return (
     <Card 
-      className={`w-full max-w-md transition-all duration-300 ${
+      className={`w-full max-w-md animate-enter will-change-transform transition-transform duration-300 ease-out ${
         isAnimating 
           ? direction === 'left' 
             ? '-translate-x-full opacity-0' 
@@ -44,7 +44,9 @@ const SwipeCard = ({ place, onSwipeLeft, onSwipeRight }: SwipeCardProps) => {
         <div className="w-full h-48 overflow-hidden rounded-t-lg">
           <img 
             src={place.imageUrl} 
-            alt={place.name}
+            alt={`${place.name} photo`}
+            loading="lazy"
+            decoding="async"
             className="w-full h-full object-cover"
           />
         </div>
@@ -87,6 +89,7 @@ const SwipeCard = ({ place, onSwipeLeft, onSwipeRight }: SwipeCardProps) => {
             variant="outline"
             size="lg"
             className="flex-1"
+            disabled={isAnimating}
             onClick={() => handleSwipe('left')}
           >
             <ThumbsDown className="w-5 h-5 mr-2" />
@@ -96,6 +99,7 @@ const SwipeCard = ({ place, onSwipeLeft, onSwipeRight }: SwipeCardProps) => {
             variant="default"
             size="lg"
             className="flex-1"
+            disabled={isAnimating}
             onClick={() => handleSwipe('right')}
           >
             <ThumbsUp className="w-5 h-5 mr-2" />

@@ -23,8 +23,8 @@ const Index = () => {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [sessionCode, setSessionCode] = useState<string | null>(null);
   const [joinCode, setJoinCode] = useState("");
-  const [view, setView] = useState<'mode-select' | 'solo' | 'session-setup' | 'swipe'>('mode-select');
-
+  const [participantsCount, setParticipantsCount] = useState<number>(1);
+  const [view, setView] = useState<'mode-select' | 'solo' | 'session-setup' | 'waiting' | 'swipe'>('mode-select');
   useEffect(() => {
     // Check auth status
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -54,6 +54,50 @@ const Index = () => {
     return Math.random().toString(36).substring(2, 8).toUpperCase();
   };
 
+  const watchParticipants = async (sid: string) => {
+    try {
+      // Initial count
+      const { count } = await supabase
+        .from('session_participants')
+        .select('*', { count: 'exact', head: true })
+        .eq('session_id', sid);
+
+      const initialCount = count ?? 1;
+      setParticipantsCount(initialCount);
+
+      if (initialCount >= 2) {
+        setView('swipe');
+        return;
+      }
+
+      setView('waiting');
+
+      // Subscribe to changes until we have 2 participants
+      const channel = supabase
+        .channel(`participants_${sid}`)
+        .on(
+          'postgres_changes',
+          { event: '*', schema: 'public', table: 'session_participants', filter: `session_id=eq.${sid}` },
+          async () => {
+            const { count: newCount } = await supabase
+              .from('session_participants')
+              .select('*', { count: 'exact', head: true })
+              .eq('session_id', sid);
+            const c = newCount ?? 1;
+            setParticipantsCount(c);
+            if (c >= 2) {
+              setView('swipe');
+              supabase.removeChannel(channel);
+            }
+          }
+        )
+        .subscribe();
+    } catch (e) {
+      console.error('Error watching participants:', e);
+      // Fallback to swipe so user is not stuck
+      setView('swipe');
+    }
+  };
   const handleCreateSession = async (preferences: {
     startAddress: string;
     radius: number;
@@ -106,8 +150,8 @@ const Index = () => {
       setRecommendations(data.places);
       setSessionId(session.id);
       setSessionCode(code);
-      setView('swipe');
       toast.success(`Session created! Code: ${code}`);
+      await watchParticipants(session.id);
     } catch (error) {
       console.error('Error creating session:', error);
       toast.error("Failed to create session");
@@ -123,26 +167,15 @@ const Index = () => {
     try {
       if (!user) throw new Error("Not authenticated");
 
-      const { data: session, error: sessionError } = await supabase
-        .from('sessions')
-        .select()
-        .eq('session_code', joinCode.toUpperCase())
-        .single();
+      // Securely join session using RPC (bypasses RLS on plain select)
+      const { data: session, error: joinError } = await (supabase as any).rpc('join_session_with_code', {
+        code: joinCode.toUpperCase(),
+      });
 
-      if (sessionError) {
+      if (joinError || !session) {
+        console.error('Join error:', joinError);
         toast.error("Session not found");
         return;
-      }
-
-      const { error: participantError } = await supabase
-        .from('session_participants')
-        .insert({
-          session_id: session.id,
-          user_id: user.id,
-        });
-
-      if (participantError && !participantError.message.includes('duplicate')) {
-        throw participantError;
       }
 
       // Generate recommendations based on session preferences
@@ -169,8 +202,8 @@ const Index = () => {
       setRecommendations(data.places);
       setSessionId(session.id);
       setSessionCode(session.session_code);
-      setView('swipe');
       toast.success("Joined session successfully!");
+      await watchParticipants(session.id);
     } catch (error) {
       console.error('Error joining session:', error);
       toast.error("Failed to join session");
@@ -254,6 +287,40 @@ const Index = () => {
                 >
                   Browse Solo
                 </Button>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      </div>
+    );
+  }
+
+  if (view === 'waiting' && sessionCode) {
+    return (
+      <div className="min-h-screen bg-background p-4">
+        <div className="max-w-md mx-auto">
+          <Card className="animate-enter">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Users className="w-6 h-6" />
+                Waiting for a friend
+              </CardTitle>
+              <CardDescription>
+                Share this code and we’ll start once two participants have joined.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="text-center">
+                <p className="text-sm font-medium">Session Code</p>
+                <div className="text-3xl font-bold tracking-widest select-all">
+                  {sessionCode}
+                </div>
+              </div>
+              <p className="text-center text-muted-foreground">
+                {participantsCount} of 2 participants joined
+              </p>
+              <div className="flex justify-center">
+                <Button variant="outline" onClick={() => setView('mode-select')}>Cancel</Button>
               </div>
             </CardContent>
           </Card>
