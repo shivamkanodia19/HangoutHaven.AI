@@ -39,11 +39,12 @@ const SwipeView = ({ sessionId, sessionCode, recommendations, onBack }: SwipeVie
   const [showRoundSummary, setShowRoundSummary] = useState(false);
   const [isHost, setIsHost] = useState(false);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
+  const [participantUserIds, setParticipantUserIds] = useState<string[]>([]);
 
-  // Check if current user is host and load participant count
+  // Check if current user is host and load participants (including host)
   useEffect(() => {
     checkIfHost();
-    loadParticipantCount();
+    loadParticipants();
   }, [sessionId]);
 
   const checkIfHost = async () => {
@@ -63,13 +64,26 @@ const SwipeView = ({ sessionId, sessionCode, recommendations, onBack }: SwipeVie
     }
   };
 
-  const loadParticipantCount = async () => {
-    const { count } = await supabase
+  const loadParticipants = async () => {
+    // Fetch host and participants, then compute distinct IDs
+    const { data: session } = await supabase
+      .from('sessions')
+      .select('created_by')
+      .eq('id', sessionId)
+      .single();
+
+    const { data: rows } = await supabase
       .from('session_participants')
-      .select('*', { count: 'exact', head: true })
+      .select('user_id')
       .eq('session_id', sessionId);
-    
-    setParticipantCount(count ?? 0);
+
+    const ids = new Set<string>();
+    if (session?.created_by) ids.add(session.created_by);
+    rows?.forEach((r: { user_id: string }) => ids.add(r.user_id));
+
+    const list = Array.from(ids);
+    setParticipantUserIds(list);
+    setParticipantCount(list.length);
   };
 
   // Subscribe to session updates to sync round progression
@@ -119,11 +133,46 @@ const SwipeView = ({ sessionId, sessionCode, recommendations, onBack }: SwipeVie
       )
       .subscribe();
 
-    subscribeToSwipes();
+    const participantsChannel = supabase
+      .channel(`participants_${sessionId}`)
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'session_participants',
+          filter: `session_id=eq.${sessionId}`,
+        },
+        () => {
+          loadParticipants();
+          checkRoundCompletion();
+        }
+      )
+      .subscribe();
+
+    const swipeChannel = supabase
+      .channel(`session_swipes_${sessionId}`)
+      .on(
+        'postgres_changes',
+        {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'session_swipes',
+          filter: `session_id=eq.${sessionId}`,
+        },
+        () => {
+          // Reload swipe counts and check round completion when anyone swipes
+          loadSwipeCounts();
+          checkRoundCompletion();
+        }
+      )
+      .subscribe();
 
     return () => {
       supabase.removeChannel(sessionChannel);
       supabase.removeChannel(matchChannel);
+      supabase.removeChannel(participantsChannel);
+      supabase.removeChannel(swipeChannel);
     };
   }, [sessionId]);
 
@@ -241,8 +290,9 @@ const SwipeView = ({ sessionId, sessionCode, recommendations, onBack }: SwipeVie
       swipesByUser[swipe.user_id].add(swipe.place_id);
     });
 
-    const allParticipantsCompleted = Object.keys(swipesByUser).length === participantCount &&
-      Object.values(swipesByUser).every(placeSet => placeSet.size === placeIds.length);
+    const expectedIds = participantUserIds;
+    const allParticipantsCompleted = expectedIds.length > 0 &&
+      expectedIds.every((uid) => (swipesByUser[uid]?.size || 0) === placeIds.length);
 
     if (!allParticipantsCompleted) {
       // Not everyone has finished swiping yet
