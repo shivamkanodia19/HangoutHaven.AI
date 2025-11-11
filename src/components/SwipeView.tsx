@@ -184,7 +184,10 @@ const SwipeView = ({ sessionId, sessionCode, recommendations, onBack }: SwipeVie
               setNextAction("end");
             }
             
-            toast.info("Host ended the round");
+            // Don't show toast if we're already showing the summary (host triggered this)
+            if (!showRoundSummary) {
+              toast.info("Host ended the round");
+            }
           } else {
             checkRoundCompletion();
           }
@@ -558,11 +561,19 @@ const SwipeView = ({ sessionId, sessionCode, recommendations, onBack }: SwipeVie
     const newAllMatches = [...allMatches, ...roundMatches];
     setAllMatches(newAllMatches);
 
-    // Update session to trigger sync for all participants
-    await supabase.from("sessions").update({ updated_at: new Date().toISOString() }).eq("id", sessionId);
-
     if (nextAction === "nextRound" && currentRoundCandidates.length > 0) {
-      // Properly reset state for new round
+      // Host advances - update database to sync all participants
+      if (isHost) {
+        await supabase
+          .from("sessions")
+          .update({ 
+            current_round: round + 1,
+            updated_at: new Date().toISOString() 
+          })
+          .eq("id", sessionId);
+      }
+      
+      // Reset state for new round
       setDeck(currentRoundCandidates);
       setCurrentIndex(0);
       setRound((prev) => prev + 1);
@@ -576,6 +587,17 @@ const SwipeView = ({ sessionId, sessionCode, recommendations, onBack }: SwipeVie
     }
 
     if (nextAction === "vote") {
+      // Host starts vote - update database to sync all participants
+      if (isHost) {
+        await supabase
+          .from("sessions")
+          .update({ 
+            current_round: round + 1,
+            updated_at: new Date().toISOString() 
+          })
+          .eq("id", sessionId);
+      }
+      
       // Reset state for voting round
       setIsVoteMode(true);
       setShowRoundSummary(false);
