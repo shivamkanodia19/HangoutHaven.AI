@@ -40,6 +40,7 @@ const SwipeView = ({ sessionId, sessionCode, recommendations, onBack }: SwipeVie
   const [isHost, setIsHost] = useState(false);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const [participantUserIds, setParticipantUserIds] = useState<string[]>([]);
+  const [nextAction, setNextAction] = useState<'nextRound' | 'vote' | 'end' | null>(null);
 
   // Check if current user is host and load participants (including host)
   useEffect(() => {
@@ -143,9 +144,9 @@ const SwipeView = ({ sessionId, sessionCode, recommendations, onBack }: SwipeVie
           table: 'session_participants',
           filter: `session_id=eq.${sessionId}`,
         },
-        () => {
-          loadParticipants();
-          checkRoundCompletion();
+        async () => {
+          await loadParticipants();
+          await checkRoundCompletion();
         }
       )
       .subscribe();
@@ -160,10 +161,9 @@ const SwipeView = ({ sessionId, sessionCode, recommendations, onBack }: SwipeVie
           table: 'session_swipes',
           filter: `session_id=eq.${sessionId}`,
         },
-        () => {
-          // Reload swipe counts and check round completion when anyone swipes
-          loadSwipeCounts();
-          checkRoundCompletion();
+        async () => {
+          await loadSwipeCounts();
+          await checkRoundCompletion();
         }
       )
       .subscribe();
@@ -270,9 +270,27 @@ const SwipeView = ({ sessionId, sessionCode, recommendations, onBack }: SwipeVie
   }, [sessionId]);
 
   const checkRoundCompletion = async () => {
+    // Refresh participant list to avoid race conditions
+    const { data: session } = await supabase
+      .from('sessions')
+      .select('created_by')
+      .eq('id', sessionId)
+      .single();
+
+    const { data: rows } = await supabase
+      .from('session_participants')
+      .select('user_id')
+      .eq('session_id', sessionId);
+
+    const ids = new Set<string>();
+    if (session?.created_by) ids.add(session.created_by);
+    rows?.forEach((r: { user_id: string }) => ids.add(r.user_id));
+    const expectedIds = Array.from(ids);
+    setParticipantUserIds(expectedIds);
+    setParticipantCount(expectedIds.length);
+
     // Get all swipes for this round's deck
     const placeIds = deck.map(p => p.id);
-    
     const { data: swipes } = await supabase
       .from('session_swipes')
       .select('place_id, direction, user_id')
@@ -290,7 +308,6 @@ const SwipeView = ({ sessionId, sessionCode, recommendations, onBack }: SwipeVie
       swipesByUser[swipe.user_id].add(swipe.place_id);
     });
 
-    const expectedIds = participantUserIds;
     const allParticipantsCompleted = expectedIds.length > 0 &&
       expectedIds.every((uid) => (swipesByUser[uid]?.size || 0) === placeIds.length);
 
@@ -310,30 +327,28 @@ const SwipeView = ({ sessionId, sessionCode, recommendations, onBack }: SwipeVie
     });
 
     // Get unanimous matches for this round (all participants liked)
-    const unanimousMatches = deck.filter(place => likeCounts[place.id] === participantCount);
-    
+    const unanimousMatches = deck.filter(place => likeCounts[place.id] === expectedIds.length);
+
     // Get all places with at least 1 like (for advancing)
     const likedPlaces = deck.filter(place => likeCounts[place.id] > 0);
-    
+
     // Remove unanimous matches from advancing places (they're already winners)
-    const advancingPlaces = likedPlaces.filter(place => 
+    const advancingPlaces = likedPlaces.filter(place =>
       !unanimousMatches.some(match => match.id === place.id)
     );
-    
-    // Sort by like count (most liked first)
-    const sortedPlaces = advancingPlaces.sort((a, b) => 
-      likeCounts[b.id] - likeCounts[a.id]
-    );
 
-    // Load current round matches for display
+    // Sort by like count (most liked first)
+    const sortedPlaces = advancingPlaces.sort((a, b) => likeCounts[b.id] - likeCounts[a.id]);
+
+    // Prepare current round matches for display
     const currentRoundMatchesData = unanimousMatches.map(place => ({
       id: `match-${place.id}`,
       place_id: place.id,
       place_data: place,
       is_final_choice: false,
-      like_count: participantCount,
+      like_count: expectedIds.length,
     }));
-    
+
     setRoundMatches(currentRoundMatchesData);
     setCurrentRoundCandidates(sortedPlaces);
     setShowRoundSummary(true);
@@ -343,40 +358,55 @@ const SwipeView = ({ sessionId, sessionCode, recommendations, onBack }: SwipeVie
     }
 
     if (sortedPlaces.length === 0 && unanimousMatches.length === 0) {
-      // No agreement - end game
+      setNextAction('end');
       setGameEnded(true);
       toast.error("No agreement reached. Game ended.");
-    } else if (sortedPlaces.length <= 2 && sortedPlaces.length > 0) {
-      // 2 or fewer advancing - enter vote mode
-      setIsVoteMode(true);
-      toast.success(`Final vote! Choose between ${sortedPlaces.length} option${sortedPlaces.length > 1 ? 's' : ''}.`);
-    } else if (sortedPlaces.length === 0) {
-      // Only unanimous matches, game complete
-      setGameEnded(true);
-      toast.success("All decisions made! Check your matches above.");
+      return;
     }
-    // If sortedPlaces > 2, wait for user to click "Continue to Next Round"
+
+    // Decide next action but always show summary first
+    if (sortedPlaces.length <= 2) {
+      setNextAction('vote');
+    } else {
+      setNextAction('nextRound');
+    }
   };
 
   const advanceToNextRound = async () => {
-    if (currentRoundCandidates.length > 2) {
-      // Merge current round matches into all matches
-      const newAllMatches = [...allMatches, ...roundMatches];
-      setAllMatches(newAllMatches);
-      
+    // Merge current round matches into all matches
+    const newAllMatches = [...allMatches, ...roundMatches];
+    setAllMatches(newAllMatches);
+
+    // Update session to trigger sync for all participants
+    await supabase
+      .from('sessions')
+      .update({ updated_at: new Date().toISOString() })
+      .eq('id', sessionId);
+
+    if (nextAction === 'nextRound' && currentRoundCandidates.length > 0) {
       setDeck(currentRoundCandidates);
       setCurrentIndex(0);
       setRound(prev => prev + 1);
       setShowRoundSummary(false);
       setRoundMatches([]);
-      
-      // Update session to trigger sync for all participants
-      await supabase
-        .from('sessions')
-        .update({ updated_at: new Date().toISOString() })
-        .eq('id', sessionId);
-      
+      setNextAction(null);
       toast.success(`Round ${round + 1}: ${currentRoundCandidates.length} places to swipe!`);
+      return;
+    }
+
+    if (nextAction === 'vote') {
+      setIsVoteMode(true);
+      setShowRoundSummary(false);
+      setNextAction(null);
+      toast.success(`Final vote! Choose between ${currentRoundCandidates.length} option${currentRoundCandidates.length > 1 ? 's' : ''}.`);
+      return;
+    }
+
+    if (nextAction === 'end') {
+      setGameEnded(true);
+      setShowRoundSummary(false);
+      setNextAction(null);
+      toast.success("All decisions made! Check your matches above.");
     }
   };
 
@@ -558,7 +588,7 @@ const SwipeView = ({ sessionId, sessionCode, recommendations, onBack }: SwipeVie
         </Card>
       )}
 
-      {isVoteMode && !gameEnded && (
+      {isVoteMode && !gameEnded && !showRoundSummary && (
         <Card className="max-w-md mx-auto border-primary bg-primary/5">
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
@@ -697,13 +727,12 @@ const SwipeView = ({ sessionId, sessionCode, recommendations, onBack }: SwipeVie
                   <Button 
                     onClick={advanceToNextRound} 
                     className="w-full"
-                    disabled={currentRoundCandidates.length <= 2}
                   >
-                    Start Round {round + 1}
+                    {nextAction === 'vote' ? 'Start Final Vote' : nextAction === 'end' ? 'Finish' : `Start Round ${round + 1}`}
                   </Button>
                 ) : (
                   <div className="p-4 border border-primary rounded-lg bg-primary/5 text-center">
-                    <p className="text-sm font-medium">Waiting for host to start next round...</p>
+                    <p className="text-sm font-medium">{nextAction === 'vote' ? 'Waiting for host to start final vote...' : 'Waiting for host to start next round...'}</p>
                   </div>
                 )}
               </CardContent>
