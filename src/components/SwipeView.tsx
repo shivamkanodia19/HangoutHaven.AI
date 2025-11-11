@@ -103,8 +103,91 @@ const SwipeView = ({ sessionId, sessionCode, recommendations, onBack }: SwipeVie
           table: "sessions",
           filter: `id=eq.${sessionId}`,
         },
-        () => {
-          checkRoundCompletion();
+        async (payload) => {
+          const newSession = payload.new as any;
+          
+          // Check if host advanced the round
+          if (newSession.current_round && newSession.current_round > round) {
+            console.log(`Host advanced round from ${round} to ${newSession.current_round}`);
+            
+            // Get current swipes to build round summary
+            const deckPlaceIds = deck.map((p) => p.id);
+            
+            const { data: swipes } = await supabase
+              .from("session_swipes")
+              .select("place_id, user_id, place_data")
+              .eq("session_id", sessionId)
+              .eq("round", round)
+              .eq("direction", "right")
+              .in("place_id", deckPlaceIds);
+            
+            // Count likes per place
+            const likeCounts: Record<string, Set<string>> = {};
+            swipes?.forEach((swipe) => {
+              if (!likeCounts[swipe.place_id]) {
+                likeCounts[swipe.place_id] = new Set();
+              }
+              likeCounts[swipe.place_id].add(swipe.user_id);
+            });
+            
+            // Find unanimous (all participants)
+            const unanimous = Object.entries(likeCounts)
+              .filter(([_, users]) => users.size === participantCount)
+              .map(([placeId]) => placeId);
+            
+            // Find advancing (some but not all)
+            const advancing = Object.entries(likeCounts)
+              .filter(([_, users]) => users.size > 0 && users.size < participantCount)
+              .sort((a, b) => b[1].size - a[1].size)
+              .map(([placeId]) => placeId);
+            
+            // Build matches for unanimous
+            const newMatches = unanimous
+              .map((placeId) => {
+                const place = deck.find((p) => p.id === placeId);
+                if (!place) return null;
+                return {
+                  id: `match-${placeId}`,
+                  place_id: placeId,
+                  place_data: place,
+                  is_final_choice: false,
+                  like_count: participantCount,
+                };
+              })
+              .filter(Boolean) as Match[];
+            
+            // Build advancing candidates
+            const advancingPlaces = advancing
+              .map((placeId) => deck.find((p) => p.id === placeId))
+              .filter(Boolean) as Place[];
+            
+            setRoundMatches(newMatches);
+            setCurrentRoundCandidates(advancingPlaces);
+            setShowRoundSummary(true);
+            
+            // Update swipe counts for display
+            const newSwipeCounts: Record<string, number> = {};
+            Object.entries(likeCounts).forEach(([placeId, users]) => {
+              newSwipeCounts[placeId] = users.size;
+            });
+            setSwipeCounts(newSwipeCounts);
+            
+            // Determine next action
+            if (advancingPlaces.length === 0 && newMatches.length === 0) {
+              setNextAction("end");
+              setGameEnded(true);
+            } else if (advancingPlaces.length <= 2 && advancingPlaces.length > 0) {
+              setNextAction("vote");
+            } else if (advancingPlaces.length > 2) {
+              setNextAction("nextRound");
+            } else {
+              setNextAction("end");
+            }
+            
+            toast.info("Host ended the round");
+          } else {
+            checkRoundCompletion();
+          }
         },
       )
       .on(
@@ -150,7 +233,7 @@ const SwipeView = ({ sessionId, sessionCode, recommendations, onBack }: SwipeVie
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [sessionId]);
+  }, [sessionId, round, deck, participantCount]);
 
   // Stabilized effect to check round completion - uses memoized & debounced deps
   useEffect(() => {
@@ -433,20 +516,35 @@ const SwipeView = ({ sessionId, sessionCode, recommendations, onBack }: SwipeVie
       setSwipeCounts(newSwipeCounts);
       
       // Determine next action
+      let determinedAction: "nextRound" | "vote" | "end";
       if (advancingPlaces.length === 0 && newMatches.length === 0) {
+        determinedAction = "end";
         setNextAction("end");
         setGameEnded(true);
         toast.success("Round forced to end!");
       } else if (advancingPlaces.length <= 2 && advancingPlaces.length > 0) {
+        determinedAction = "vote";
         setNextAction("vote");
         toast.success(`Forcing to final vote with ${advancingPlaces.length} options!`);
       } else if (advancingPlaces.length > 2) {
+        determinedAction = "nextRound";
         setNextAction("nextRound");
         toast.success(`Forced round end! ${advancingPlaces.length} places advancing.`);
       } else {
+        determinedAction = "end";
         setNextAction("end");
         toast.success("Round ended!");
       }
+      
+      // Update session's current_round to sync all participants
+      await supabase
+        .from("sessions")
+        .update({ 
+          current_round: round + 1,
+          updated_at: new Date().toISOString() 
+        })
+        .eq("id", sessionId);
+        
     } catch (error) {
       console.error("Error forcing round advance:", error);
       toast.error("Failed to advance round");

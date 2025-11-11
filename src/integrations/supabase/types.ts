@@ -190,6 +190,7 @@ export type Database = {
           activities: string | null
           created_at: string
           created_by: string
+          current_round: number
           food_preferences: string | null
           id: string
           radius: number
@@ -203,6 +204,7 @@ export type Database = {
           activities?: string | null
           created_at?: string
           created_by: string
+          current_round?: number
           food_preferences?: string | null
           id?: string
           radius?: number
@@ -216,6 +218,7 @@ export type Database = {
           activities?: string | null
           created_at?: string
           created_by?: string
+          current_round?: number
           food_preferences?: string | null
           id?: string
           radius?: number
@@ -246,6 +249,7 @@ export type Database = {
           activities: string | null
           created_at: string
           created_by: string
+          current_round: number
           food_preferences: string | null
           id: string
           radius: number
