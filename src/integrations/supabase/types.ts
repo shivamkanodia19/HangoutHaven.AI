@@ -229,6 +229,14 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
+      check_and_complete_round: {
+        Args: {
+          p_deck_place_ids: string[]
+          p_round_number: number
+          p_session_id: string
+        }
+        Returns: Json
+      }
       join_session_with_code: {
         Args: { code: string }
         Returns: {

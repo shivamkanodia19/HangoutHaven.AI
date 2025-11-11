@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { Place } from "@/types/place";
 import SwipeCard from "./SwipeCard";
@@ -8,6 +8,7 @@ import { Badge } from "@/components/ui/badge";
 import { Heart, PartyPopper, ArrowLeft, RotateCcw, Sparkles } from "lucide-react";
 import { toast } from "sonner";
 import { Progress } from "@/components/ui/progress";
+import { useDebounce } from "@/hooks/useDebounce";
 
 interface SwipeViewProps {
   sessionId: string;
@@ -41,6 +42,18 @@ const SwipeView = ({ sessionId, sessionCode, recommendations, onBack }: SwipeVie
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const [participantUserIds, setParticipantUserIds] = useState<string[]>([]);
   const [nextAction, setNextAction] = useState<'nextRound' | 'vote' | 'end' | null>(null);
+
+  // Ref guard to prevent overlapping checks
+  const isCheckingRound = useRef(false);
+  const abortControllerRef = useRef<AbortController | null>(null);
+
+  // Memoize stable dependency keys to prevent effect loop
+  const deckIds = useMemo(() => deck.map(p => p.id).join(','), [deck]);
+  const participantIds = useMemo(() => participantUserIds.join(','), [participantUserIds]);
+  
+  // Debounce to avoid rapid-fire checks during swipe bursts
+  const debouncedDeckIds = useDebounce(deckIds, 300);
+  const debouncedParticipantIds = useDebounce(participantIds, 300);
 
   // Check if current user is host and load participants (including host)
   useEffect(() => {
@@ -176,18 +189,14 @@ const SwipeView = ({ sessionId, sessionCode, recommendations, onBack }: SwipeVie
     };
   }, [sessionId]);
 
-  // Check round completion when index changes
+  // Stabilized effect to check round completion - uses memoized & debounced deps
   useEffect(() => {
-    if (currentIndex < deck.length || participantCount === 0) return;
+    if (!debouncedDeckIds || !debouncedParticipantIds) return;
+    if (showRoundSummary || isVoteMode || gameEnded) return; // don't check during summary or after end
+    if (isCheckingRound.current) return; // prevent overlapping executions
+    
     checkRoundCompletion();
-  }, [currentIndex, deck.length, participantCount]);
-
-  // Also re-check when deck or participant list changes to avoid race conditions
-  useEffect(() => {
-    if (!deck.length || !participantUserIds.length) return;
-    if (showRoundSummary || isVoteMode || gameEnded) return; // don't recalc during summary or after end
-    checkRoundCompletion();
-  }, [deck, participantUserIds, showRoundSummary, isVoteMode, gameEnded]);
+  }, [debouncedDeckIds, debouncedParticipantIds, showRoundSummary, isVoteMode, gameEnded]);
 
   const subscribeToSwipes = () => {
     const swipeChannel = supabase
@@ -277,108 +286,136 @@ const SwipeView = ({ sessionId, sessionCode, recommendations, onBack }: SwipeVie
   }, [sessionId]);
 
   const checkRoundCompletion = async () => {
-    // Refresh participant list to avoid race conditions
-    const { data: session } = await supabase
-      .from('sessions')
-      .select('created_by')
-      .eq('id', sessionId)
-      .single();
+    // Guard: prevent overlapping executions
+    if (isCheckingRound.current) return;
+    
+    isCheckingRound.current = true;
+    
+    // Cancel any previous in-flight check
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
+    abortControllerRef.current = new AbortController();
+    const signal = abortControllerRef.current.signal;
 
-    const { data: rows } = await supabase
-      .from('session_participants')
-      .select('user_id')
-      .eq('session_id', sessionId);
-
-    const ids = new Set<string>();
-    if (session?.created_by) ids.add(session.created_by);
-    rows?.forEach((r: { user_id: string }) => ids.add(r.user_id));
-    const expectedIds = Array.from(ids);
-    setParticipantUserIds(expectedIds);
-    setParticipantCount(expectedIds.length);
-
-    // Get all swipes for this round's deck
-    const placeIds = deck.map(p => p.id);
-    const { data: swipes } = await supabase
-      .from('session_swipes')
-      .select('place_id, direction, user_id')
-      .eq('session_id', sessionId)
-      .in('place_id', placeIds);
-
-    if (!swipes) return;
-
-    // Check if ALL participants have swiped on ALL places in the deck
-    const swipesByUser: Record<string, Set<string>> = {};
-    swipes.forEach(swipe => {
-      if (!swipesByUser[swipe.user_id]) {
-        swipesByUser[swipe.user_id] = new Set();
+    try {
+      // Prepare deck place IDs for RPC call
+      const deckPlaceIds = deck.map(p => p.id);
+      
+      if (deckPlaceIds.length === 0) {
+        return;
       }
-      swipesByUser[swipe.user_id].add(swipe.place_id);
-    });
 
-    const allParticipantsCompleted = expectedIds.length > 0 &&
-      expectedIds.every((uid) => {
-        const userSet = swipesByUser[uid] || new Set<string>();
-        return placeIds.every((pid) => userSet.has(pid));
+      // Call server-side atomic round completion RPC
+      const { data, error } = await supabase.rpc('check_and_complete_round', {
+        p_session_id: sessionId,
+        p_deck_place_ids: deckPlaceIds,
+        p_round_number: round,
       });
 
-    if (!allParticipantsCompleted) {
-      // Not everyone has finished swiping yet
-      return;
-    }
-
-    // Group by place_id and count right swipes
-    const likeCounts: Record<string, number> = {};
-    placeIds.forEach(id => likeCounts[id] = 0);
-
-    swipes.forEach(swipe => {
-      if (swipe.direction === 'right') {
-        likeCounts[swipe.place_id] = (likeCounts[swipe.place_id] || 0) + 1;
+      // Check if request was aborted
+      if (signal.aborted) {
+        return;
       }
-    });
 
-    // Get unanimous matches for this round (all participants liked)
-    const unanimousMatches = deck.filter(place => likeCounts[place.id] === expectedIds.length);
+      if (error) {
+        console.error('Error checking round completion:', error);
+        return;
+      }
 
-    // Get all places with at least 1 like (for advancing)
-    const likedPlaces = deck.filter(place => likeCounts[place.id] > 0);
+      if (!data) return;
 
-    // Remove unanimous matches from advancing places (they're already winners)
-    const advancingPlaces = likedPlaces.filter(place =>
-      !unanimousMatches.some(match => match.id === place.id)
-    );
+      // Cast data to expected shape
+      const result = data as {
+        completed: boolean;
+        participant_count: number;
+        unanimous_matches: string[];
+        advancing_places: Array<{
+          place_id: string;
+          like_count: number;
+          place_data: any;
+        }>;
+      };
 
-    // Sort by like count (most liked first)
-    const sortedPlaces = advancingPlaces.sort((a, b) => likeCounts[b.id] - likeCounts[a.id]);
+      // Update participant count from server response
+      setParticipantCount(result.participant_count || 0);
 
-    // Prepare current round matches for display
-    const currentRoundMatchesData = unanimousMatches.map(place => ({
-      id: `match-${place.id}`,
-      place_id: place.id,
-      place_data: place,
-      is_final_choice: false,
-      like_count: expectedIds.length,
-    }));
+      // If round not completed, exit early
+      if (!result.completed) {
+        return;
+      }
 
-    setRoundMatches(currentRoundMatchesData);
-    setCurrentRoundCandidates(sortedPlaces);
-    setShowRoundSummary(true);
+      // Round is complete - process results
+      const unanimousMatchIds = result.unanimous_matches || [];
+      const advancingPlacesData = result.advancing_places || [];
 
-    if (unanimousMatches.length > 0) {
-      toast.success(`🎉 ${unanimousMatches.length} unanimous match${unanimousMatches.length > 1 ? 'es' : ''} this round!`);
-    }
+      // Build round matches from unanimous IDs
+      const currentRoundMatchesData = unanimousMatchIds
+        .map((placeId: string) => {
+          const place = deck.find(p => p.id === placeId);
+          if (!place) return null;
+          return {
+            id: `match-${placeId}`,
+            place_id: placeId,
+            place_data: place,
+            is_final_choice: false,
+            like_count: result.participant_count,
+          };
+        })
+        .filter(Boolean) as Match[];
 
-    if (sortedPlaces.length === 0 && unanimousMatches.length === 0) {
-      setNextAction('end');
-      setGameEnded(true);
-      toast.error("No agreement reached. Game ended.");
-      return;
-    }
+      // Build advancing candidates with like counts, sorted descending
+      const advancingCandidates = advancingPlacesData
+        .map((item: any) => {
+          const place = deck.find(p => p.id === item.place_id);
+          if (!place) return null;
+          return { ...place, like_count: item.like_count };
+        })
+        .filter(Boolean)
+        .sort((a: any, b: any) => b.like_count - a.like_count)
+        .map((p: any) => {
+          const { like_count, ...place } = p;
+          return place as Place;
+        });
 
-    // Decide next action but always show summary first
-    if (sortedPlaces.length <= 2) {
-      setNextAction('vote');
-    } else {
-      setNextAction('nextRound');
+      // Update swipe counts for UI display
+      const newSwipeCounts: Record<string, number> = {};
+      advancingPlacesData.forEach((item: any) => {
+        newSwipeCounts[item.place_id] = item.like_count;
+      });
+      setSwipeCounts(newSwipeCounts);
+
+      setRoundMatches(currentRoundMatchesData);
+      setCurrentRoundCandidates(advancingCandidates);
+      setShowRoundSummary(true);
+
+      if (currentRoundMatchesData.length > 0) {
+        toast.success(`🎉 ${currentRoundMatchesData.length} unanimous match${currentRoundMatchesData.length > 1 ? 'es' : ''} this round!`);
+      }
+
+      // Determine next action
+      if (advancingCandidates.length === 0 && currentRoundMatchesData.length === 0) {
+        setNextAction('end');
+        setGameEnded(true);
+        toast.error("No agreement reached. Game ended.");
+        return;
+      }
+
+      if (advancingCandidates.length <= 2 && advancingCandidates.length > 0) {
+        setNextAction('vote');
+      } else if (advancingCandidates.length > 2) {
+        setNextAction('nextRound');
+      } else {
+        setNextAction('end');
+      }
+    } catch (error: any) {
+      if (error.name === 'AbortError') {
+        // Request was cancelled, ignore
+        return;
+      }
+      console.error('Error in checkRoundCompletion:', error);
+    } finally {
+      isCheckingRound.current = false;
     }
   };
 
