@@ -27,9 +27,9 @@ interface Match {
 
 const SwipeView = ({ sessionId, sessionCode, recommendations, onBack }: SwipeViewProps) => {
   const [currentIndex, setCurrentIndex] = useState(0);
-  const [allMatches, setAllMatches] = useState<Match[]>([]);
-  const [roundMatches, setRoundMatches] = useState<Match[]>([]);
-  const [currentRoundCandidates, setCurrentRoundCandidates] = useState<Place[]>([]);
+  const [allMatches, setAllMatches] = useState<Match[]>([]); // All unanimous matches
+  const [roundMatches, setRoundMatches] = useState<Match[]>([]); // Matches from current round
+  const [currentRoundCandidates, setCurrentRoundCandidates] = useState<Place[]>([]); // Places advancing to next round
   const [isLoading, setIsLoading] = useState(false);
   const [round, setRound] = useState(1);
   const [deck, setDeck] = useState<Place[]>(recommendations);
@@ -43,31 +43,41 @@ const SwipeView = ({ sessionId, sessionCode, recommendations, onBack }: SwipeVie
   const [participantUserIds, setParticipantUserIds] = useState<string[]>([]);
   const [nextAction, setNextAction] = useState<"nextRound" | "vote" | "end" | null>(null);
 
+  // Ref guard to prevent overlapping checks
   const isCheckingRound = useRef(false);
+  const abortControllerRef = useRef<AbortController | null>(null);
 
+  // Memoize stable dependency keys to prevent effect loop
   const deckIds = useMemo(() => deck.map((p) => p.id).join(","), [deck]);
   const participantIds = useMemo(() => participantUserIds.join(","), [participantUserIds]);
+
+  // Debounce to avoid rapid-fire checks during swipe bursts
   const debouncedDeckIds = useDebounce(deckIds, 300);
   const debouncedParticipantIds = useDebounce(participantIds, 300);
 
-  // Load current user and host status
+  // Check if current user is host and load participants (including host)
   useEffect(() => {
-    const init = async () => {
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
-      if (!user) return;
-      setCurrentUserId(user.id);
-
-      const { data: session } = await supabase.from("sessions").select("created_by").eq("id", sessionId).single();
-
-      if (session) setIsHost(session.created_by === user.id);
-    };
-    init();
+    checkIfHost();
     loadParticipants();
   }, [sessionId]);
 
+  const checkIfHost = async () => {
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    if (!user) return;
+
+    setCurrentUserId(user.id);
+
+    const { data: session } = await supabase.from("sessions").select("created_by").eq("id", sessionId).single();
+
+    if (session) {
+      setIsHost(session.created_by === user.id);
+    }
+  };
+
   const loadParticipants = async () => {
+    // Fetch host and participants, then compute distinct IDs
     const { data: session } = await supabase.from("sessions").select("created_by").eq("id", sessionId).single();
 
     const { data: rows } = await supabase.from("session_participants").select("user_id").eq("session_id", sessionId);
@@ -81,156 +91,364 @@ const SwipeView = ({ sessionId, sessionCode, recommendations, onBack }: SwipeVie
     setParticipantCount(list.length);
   };
 
-  // Load matches and swipes
+  // Subscribe to session updates to sync round progression
   useEffect(() => {
-    loadMatches();
-    loadSwipeCounts();
+    const sessionChannel = supabase
+      .channel(`session_sync_${sessionId}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "UPDATE",
+          schema: "public",
+          table: "sessions",
+          filter: `id=eq.${sessionId}`,
+        },
+        () => {
+          // Session updated, reload state
+          checkRoundCompletion();
+        },
+      )
+      .subscribe();
+
+    const matchChannel = supabase
+      .channel(`session_matches_${sessionId}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "INSERT",
+          schema: "public",
+          table: "session_matches",
+          filter: `session_id=eq.${sessionId}`,
+        },
+        () => {
+          loadMatches(); // Reload all matches silently
+        },
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "UPDATE",
+          schema: "public",
+          table: "session_matches",
+          filter: `session_id=eq.${sessionId}`,
+        },
+        () => {
+          loadMatches(); // Reload when matches are updated
+        },
+      )
+      .subscribe();
+
+    const participantsChannel = supabase
+      .channel(`participants_${sessionId}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "session_participants",
+          filter: `session_id=eq.${sessionId}`,
+        },
+        async () => {
+          await loadParticipants();
+          await checkRoundCompletion();
+        },
+      )
+      .subscribe();
+
+    const swipeChannel = supabase
+      .channel(`session_swipes_${sessionId}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "INSERT",
+          schema: "public",
+          table: "session_swipes",
+          filter: `session_id=eq.${sessionId}`,
+        },
+        async () => {
+          await loadSwipeCounts();
+          await checkRoundCompletion();
+        },
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(sessionChannel);
+      supabase.removeChannel(matchChannel);
+      supabase.removeChannel(participantsChannel);
+      supabase.removeChannel(swipeChannel);
+    };
   }, [sessionId]);
 
-  const loadMatches = async () => {
-    const { data, error } = await supabase.from("session_matches").select("*").eq("session_id", sessionId);
+  // Stabilized effect to check round completion - uses memoized & debounced deps
+  useEffect(() => {
+    if (!debouncedDeckIds || !debouncedParticipantIds) return;
+    if (showRoundSummary || isVoteMode || gameEnded) return; // don't check during summary or after end
+    if (isCheckingRound.current) return; // prevent overlapping executions
 
-    if (!error && data) {
-      setAllMatches(
-        data.map((m) => ({
-          id: m.id,
-          place_id: m.place_id,
-          place_data: m.place_data as unknown as Place,
-          is_final_choice: m.is_final_choice,
-          like_count: 0,
-        })),
-      );
-    }
+    checkRoundCompletion();
+  }, [debouncedDeckIds, debouncedParticipantIds, showRoundSummary, isVoteMode, gameEnded]);
+
+  const subscribeToSwipes = () => {
+    const swipeChannel = supabase
+      .channel(`session_swipes_${sessionId}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "INSERT",
+          schema: "public",
+          table: "session_swipes",
+          filter: `session_id=eq.${sessionId}`,
+        },
+        () => {
+          // Reload swipe counts and check round completion when anyone swipes
+          loadSwipeCounts();
+          checkRoundCompletion();
+        },
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(swipeChannel);
+    };
   };
 
   const loadSwipeCounts = async () => {
+    const placeIds = deck.map((p) => p.id);
+
     const { data: swipes } = await supabase
       .from("session_swipes")
       .select("place_id, user_id")
       .eq("session_id", sessionId)
       .eq("direction", "right")
-      .in(
-        "place_id",
-        deck.map((p) => p.id),
-      );
+      .in("place_id", placeIds);
 
-    if (!swipes) return;
+    if (swipes) {
+      const counts: Record<string, Set<string>> = {};
+      swipes.forEach((swipe) => {
+        if (!counts[swipe.place_id]) {
+          counts[swipe.place_id] = new Set();
+        }
+        counts[swipe.place_id].add(swipe.user_id);
+      });
 
-    const counts: Record<string, Set<string>> = {};
-    swipes.forEach((s) => {
-      if (!counts[s.place_id]) counts[s.place_id] = new Set();
-      counts[s.place_id].add(s.user_id);
-    });
+      const swipeCountsMap: Record<string, number> = {};
+      Object.keys(counts).forEach((placeId) => {
+        swipeCountsMap[placeId] = counts[placeId].size;
+      });
 
-    const swipeCountsMap: Record<string, number> = {};
-    Object.keys(counts).forEach((pid) => (swipeCountsMap[pid] = counts[pid].size));
-    setSwipeCounts(swipeCountsMap);
+      setSwipeCounts(swipeCountsMap);
+    }
   };
 
-  // Check if round is complete
+  const loadMatches = async () => {
+    const { data, error } = await supabase.from("session_matches").select("*").eq("session_id", sessionId);
+
+    if (!error && data) {
+      // Load like counts for each match
+      const matchesWithCounts = await Promise.all(
+        data.map(async (match) => {
+          const { count } = await supabase
+            .from("session_swipes")
+            .select("*", { count: "exact", head: true })
+            .eq("session_id", sessionId)
+            .eq("place_id", match.place_id)
+            .eq("direction", "right");
+
+          return {
+            ...match,
+            place_data: match.place_data as unknown as Place,
+            like_count: count || 0,
+          };
+        }),
+      );
+
+      setAllMatches(matchesWithCounts as Match[]);
+    }
+  };
+
+  // Initial load of matches and swipe counts
+  useEffect(() => {
+    loadMatches();
+    loadSwipeCounts();
+  }, [sessionId]);
+
   const checkRoundCompletion = async () => {
-    if (isCheckingRound.current || showRoundSummary || isVoteMode || gameEnded) return;
+    // Guard: prevent overlapping executions
+    if (isCheckingRound.current) return;
+
     isCheckingRound.current = true;
 
+    // Cancel any previous in-flight check
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
+    abortControllerRef.current = new AbortController();
+    const signal = abortControllerRef.current.signal;
+
     try {
-      // Count completed swipes per user
-      const { data: swipes } = await supabase
-        .from("session_swipes")
-        .select("user_id, place_id")
-        .eq("session_id", sessionId)
-        .in(
-          "place_id",
-          deck.map((p) => p.id),
-        )
-        .eq("direction", "right");
+      // Prepare deck place IDs for RPC call
+      const deckPlaceIds = deck.map((p) => p.id);
 
-      const swipesByUser: Record<string, Set<string>> = {};
-      swipes?.forEach((s) => {
-        if (!swipesByUser[s.user_id]) swipesByUser[s.user_id] = new Set();
-        swipesByUser[s.user_id].add(s.place_id);
+      if (deckPlaceIds.length === 0) {
+        return;
+      }
+
+      // Call server-side atomic round completion RPC
+      const { data, error } = await supabase.rpc("check_and_complete_round", {
+        p_session_id: sessionId,
+        p_deck_place_ids: deckPlaceIds,
+        p_round_number: round,
       });
 
-      // Check if all participants finished this round
-      const allCompleted = participantUserIds.every((uid) => deck.every((p) => swipesByUser[uid]?.has(p.id)));
+      // Check if request was aborted
+      if (signal.aborted) {
+        return;
+      }
 
-      if (!allCompleted) return;
+      if (error) {
+        console.error("Error checking round completion:", error);
+        return;
+      }
 
-      // Determine unanimous matches
-      const unanimousMatches: Match[] = deck
-        .filter((place) => participantUserIds.every((uid) => swipesByUser[uid]?.has(place.id)))
-        .map((place) => ({
-          id: `match-${place.id}`,
-          place_id: place.id,
-          place_data: place,
-          is_final_choice: false,
-          like_count: participantUserIds.length,
-        }));
+      if (!data) return;
 
-      // Determine advancing candidates (more than 1 like but not unanimous)
-      const advancingCandidates: Place[] = deck.filter((place) => {
-        const likes = swipesByUser ? swipes.filter((s) => s.place_id === place.id).length : 0;
-        return likes < participantUserIds.length && likes > 0;
+      // Cast data to expected shape
+      const result = data as {
+        completed: boolean;
+        participant_count: number;
+        unanimous_matches: string[];
+        advancing_places: Array<{
+          place_id: string;
+          like_count: number;
+          place_data: any;
+        }>;
+      };
+
+      // Update participant count from server response
+      setParticipantCount(result.participant_count || 0);
+
+      // If round not completed, exit early
+      if (!result.completed) {
+        return;
+      }
+
+      // Round is complete - process results
+      const unanimousMatchIds = result.unanimous_matches || [];
+      const advancingPlacesData = result.advancing_places || [];
+
+      // Build round matches from unanimous IDs
+      const currentRoundMatchesData = unanimousMatchIds
+        .map((placeId: string) => {
+          const place = deck.find((p) => p.id === placeId);
+          if (!place) return null;
+          return {
+            id: `match-${placeId}`,
+            place_id: placeId,
+            place_data: place,
+            is_final_choice: false,
+            like_count: result.participant_count,
+          };
+        })
+        .filter(Boolean) as Match[];
+
+      // Build advancing candidates with like counts, sorted descending
+      const advancingCandidates = advancingPlacesData
+        .map((item: any) => {
+          const place = deck.find((p) => p.id === item.place_id);
+          if (!place) return null;
+          return { ...place, like_count: item.like_count };
+        })
+        .filter(Boolean)
+        .sort((a: any, b: any) => b.like_count - a.like_count)
+        .map((p: any) => {
+          const { like_count, ...place } = p;
+          return place as Place;
+        });
+
+      // Update swipe counts for UI display
+      const newSwipeCounts: Record<string, number> = {};
+      advancingPlacesData.forEach((item: any) => {
+        newSwipeCounts[item.place_id] = item.like_count;
       });
+      setSwipeCounts(newSwipeCounts);
 
-      // Update state
-      setRoundMatches(unanimousMatches);
+      setRoundMatches(currentRoundMatchesData);
       setCurrentRoundCandidates(advancingCandidates);
       setShowRoundSummary(true);
 
-      // Set next action
-      if (advancingCandidates.length === 0 && unanimousMatches.length === 0) {
+      if (currentRoundMatchesData.length > 0) {
+        toast.success(
+          `🎉 ${currentRoundMatchesData.length} unanimous match${currentRoundMatchesData.length > 1 ? "es" : ""} this round!`,
+        );
+      }
+
+      // Determine next action
+      if (advancingCandidates.length === 0 && currentRoundMatchesData.length === 0) {
         setNextAction("end");
         setGameEnded(true);
-      } else if (advancingCandidates.length <= 2 && advancingCandidates.length > 0) {
+        toast.error("No agreement reached. Game ended.");
+        return;
+      }
+
+      if (advancingCandidates.length <= 2 && advancingCandidates.length > 0) {
         setNextAction("vote");
       } else if (advancingCandidates.length > 2) {
         setNextAction("nextRound");
       } else {
         setNextAction("end");
       }
-
-      // Update swipe counts
-      const newSwipeCounts: Record<string, number> = {};
-      deck.forEach((p) => {
-        newSwipeCounts[p.id] = swipes.filter((s) => s.place_id === p.id).length;
-      });
-      setSwipeCounts(newSwipeCounts);
-    } catch (err) {
-      console.error("Error in checkRoundCompletion:", err);
+    } catch (error: any) {
+      if (error.name === "AbortError") {
+        // Request was cancelled, ignore
+        return;
+      }
+      console.error("Error in checkRoundCompletion:", error);
     } finally {
       isCheckingRound.current = false;
     }
   };
 
-  useEffect(() => {
-    if (!debouncedDeckIds || !debouncedParticipantIds) return;
-    checkRoundCompletion();
-  }, [debouncedDeckIds, debouncedParticipantIds]);
-
-  // Advance to next round
   const advanceToNextRound = async () => {
-    setAllMatches((prev) => [...prev, ...roundMatches]);
-    setShowRoundSummary(false);
-    setRoundMatches([]);
-    setSwipeCounts({});
-    setNextAction(null);
+    // Merge current round matches into all matches
+    const newAllMatches = [...allMatches, ...roundMatches];
+    setAllMatches(newAllMatches);
+
+    // Update session to trigger sync for all participants
+    await supabase.from("sessions").update({ updated_at: new Date().toISOString() }).eq("id", sessionId);
 
     if (nextAction === "nextRound" && currentRoundCandidates.length > 0) {
       setDeck(currentRoundCandidates);
       setCurrentIndex(0);
       setRound((prev) => prev + 1);
+      setShowRoundSummary(false);
+      setRoundMatches([]);
+      setNextAction(null);
       toast.success(`Round ${round + 1}: ${currentRoundCandidates.length} places to swipe!`);
-    } else if (nextAction === "vote") {
+      return;
+    }
+
+    if (nextAction === "vote") {
       setIsVoteMode(true);
-      toast.success(`Final vote! Choose between ${currentRoundCandidates.length} options.`);
-    } else if (nextAction === "end") {
+      setShowRoundSummary(false);
+      setNextAction(null);
+      toast.success(
+        `Final vote! Choose between ${currentRoundCandidates.length} option${currentRoundCandidates.length > 1 ? "s" : ""}.`,
+      );
+      return;
+    }
+
+    if (nextAction === "end") {
       setGameEnded(true);
-      toast.success("Game ended. Check matches above!");
+      setShowRoundSummary(false);
+      setNextAction(null);
+      toast.success("All decisions made! Check your matches above.");
     }
   };
 
   const handleSwipe = async (direction: "left" | "right") => {
     if (currentIndex >= deck.length) return;
+
     const place = deck[currentIndex];
     setIsLoading(true);
 
@@ -238,32 +456,35 @@ const SwipeView = ({ sessionId, sessionCode, recommendations, onBack }: SwipeVie
       const {
         data: { user },
       } = await supabase.auth.getUser();
-      if (!user) return;
+      if (!user) throw new Error("Not authenticated");
 
-      // Prevent duplicate swipe
-      const { data: existing } = await supabase
+      // Check if swipe already exists
+      const { data: existingSwipe } = await supabase
         .from("session_swipes")
         .select("id")
         .eq("session_id", sessionId)
-        .eq("place_id", place.id)
         .eq("user_id", user.id)
+        .eq("place_id", place.id)
         .single();
 
-      if (!existing) {
-        await supabase.from("session_swipes").insert({
-          session_id: sessionId,
-          user_id: user.id,
-          place_id: place.id,
-          place_data: place as any,
-          direction,
-        });
+      if (existingSwipe) {
+        // Already swiped, just move to next
+        setCurrentIndex((prev) => prev + 1);
+        return;
       }
 
+      await supabase.from("session_swipes").insert({
+        session_id: sessionId,
+        user_id: user.id,
+        place_id: place.id,
+        place_data: place as any,
+        direction,
+      });
+
       setCurrentIndex((prev) => prev + 1);
-      loadSwipeCounts();
-      checkRoundCompletion();
-    } catch (err) {
-      console.error(err);
+    } catch (error) {
+      console.error("Error recording swipe:", error);
+      toast.error("Failed to record swipe");
     } finally {
       setIsLoading(false);
     }
@@ -275,8 +496,9 @@ const SwipeView = ({ sessionId, sessionCode, recommendations, onBack }: SwipeVie
       const {
         data: { user },
       } = await supabase.auth.getUser();
-      if (!user) return;
+      if (!user) throw new Error("Not authenticated");
 
+      // Record vote as a swipe
       await supabase.from("session_swipes").insert({
         session_id: sessionId,
         user_id: user.id,
@@ -285,7 +507,9 @@ const SwipeView = ({ sessionId, sessionCode, recommendations, onBack }: SwipeVie
         direction: "right",
       });
 
-      // Check if all voted
+      toast.success(`Voted for ${place.name}!`);
+
+      // Check if all participants have voted
       const { data: voteSwipes } = await supabase
         .from("session_swipes")
         .select("user_id")
@@ -295,41 +519,47 @@ const SwipeView = ({ sessionId, sessionCode, recommendations, onBack }: SwipeVie
           currentRoundCandidates.map((p) => p.id),
         );
 
-      if (voteSwipes) {
-        const uniqueVoters = new Set(voteSwipes.map((s) => s.user_id));
-        if (uniqueVoters.size >= participantCount) {
-          tallyFinalVotes();
-        }
-      }
+      const uniqueVoters = new Set(voteSwipes?.map((s) => s.user_id));
 
-      loadSwipeCounts();
-    } catch (err) {
-      console.error(err);
+      if (uniqueVoters.size >= participantCount) {
+        // All voted - tally results
+        tallyFinalVotes();
+      }
+    } catch (error) {
+      console.error("Error recording vote:", error);
+      toast.error("Failed to record vote");
     } finally {
       setIsLoading(false);
     }
   };
 
   const tallyFinalVotes = async () => {
-    const votesRes = await supabase
+    const placeIds = currentRoundCandidates.map((p) => p.id);
+
+    const { data: votes } = await supabase
       .from("session_swipes")
       .select("place_id")
       .eq("session_id", sessionId)
       .eq("direction", "right")
-      .in(
-        "place_id",
-        currentRoundCandidates.map((p) => p.id),
-      );
+      .in("place_id", placeIds);
 
-    if (!votesRes.data) return;
+    if (!votes || votes.length === 0) {
+      toast.error("No votes recorded!");
+      return;
+    }
 
+    // Count votes
     const voteCounts: Record<string, number> = {};
-    votesRes.data.forEach((v) => (voteCounts[v.place_id] = (voteCounts[v.place_id] || 0) + 1));
+    votes.forEach((v) => {
+      voteCounts[v.place_id] = (voteCounts[v.place_id] || 0) + 1;
+    });
 
-    const winner = currentRoundCandidates.reduce((prev, cur) =>
-      (voteCounts[cur.id] || 0) > (voteCounts[prev.id] || 0) ? cur : prev,
+    // Find winner
+    const winner = currentRoundCandidates.reduce((prev, current) =>
+      (voteCounts[current.id] || 0) > (voteCounts[prev.id] || 0) ? current : prev,
     );
 
+    // Mark as final choice if it's in matches
     const winnerMatch = allMatches.find((m) => m.place_id === winner.id);
     if (winnerMatch) {
       await supabase.from("session_matches").update({ is_final_choice: true }).eq("id", winnerMatch.id);
@@ -344,8 +574,255 @@ const SwipeView = ({ sessionId, sessionCode, recommendations, onBack }: SwipeVie
 
   return (
     <div className="min-h-screen bg-background p-4 space-y-6">
-      {/* Header & rounds & swipe cards ... */}
-      {/* (Use your existing JSX for the UI rendering, it's unchanged) */}
+      {/* Header */}
+      <div className="flex items-center justify-between max-w-md mx-auto">
+        <Button variant="ghost" onClick={onBack}>
+          <ArrowLeft className="w-4 h-4 mr-2" />
+          Back
+        </Button>
+        <div className="text-center">
+          <p className="text-sm font-medium">Session Code</p>
+          <Badge variant="secondary" className="text-lg">
+            {sessionCode}
+          </Badge>
+        </div>
+      </div>
+
+      {/* Round Banner */}
+      {!gameEnded && !isVoteMode && !showRoundSummary && (
+        <Card className={`max-w-md mx-auto ${round > 1 ? "border-primary bg-primary/5" : ""}`}>
+          <CardHeader className="pb-3">
+            <CardTitle className="flex items-center gap-2 text-lg">
+              {round === 1 ? (
+                <>
+                  <Sparkles className="w-5 h-5" />
+                  Round 1: Initial Swipes
+                </>
+              ) : (
+                <>
+                  <Heart className="w-5 h-5 text-primary" />
+                  Round {round}: Narrowing Down
+                </>
+              )}
+            </CardTitle>
+            <CardDescription>
+              {round === 1
+                ? "Swipe through all places. Unanimous matches will be revealed at the end!"
+                : `Keep swiping to narrow down. Matches shown at end of round!`}
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="pt-0">
+            <div className="space-y-2">
+              <div className="flex items-center justify-between text-sm text-muted-foreground">
+                <span>Progress</span>
+                <span>
+                  {currentIndex} of {deck.length}
+                </span>
+              </div>
+              <Progress value={progressPercent} className="h-2" />
+              <p className="text-xs text-muted-foreground text-center">
+                {participantCount} participant{participantCount !== 1 ? "s" : ""} in session
+              </p>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {isVoteMode && !gameEnded && !showRoundSummary && (
+        <Card className="max-w-md mx-auto border-primary bg-primary/5">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <PartyPopper className="w-5 h-5 text-primary" />
+              Final Vote!
+            </CardTitle>
+            <CardDescription>
+              Choose your favorite from the final {currentRoundCandidates.length} options
+            </CardDescription>
+          </CardHeader>
+        </Card>
+      )}
+
+      {/* Waiting message when user finishes before others */}
+      {currentIndex >= deck.length && !showRoundSummary && !isVoteMode && !gameEnded && (
+        <Card className="max-w-md mx-auto border-primary">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <RotateCcw className="w-5 h-5 animate-spin text-primary" />
+              Waiting for All Participants...
+            </CardTitle>
+            <CardDescription>Round {round} will complete when everyone finishes swiping</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <p className="text-sm text-muted-foreground">
+              {participantCount} participant{participantCount !== 1 ? "s" : ""} total
+            </p>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Show all unanimous matches - only in round summary or game ended */}
+      {allMatches.length > 0 && (showRoundSummary || gameEnded) && (
+        <Card className="max-w-md mx-auto border-primary">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <Heart className="w-5 h-5 text-primary" />
+              All Unanimous Matches ({allMatches.length})
+            </CardTitle>
+            <CardDescription>Places ALL participants loved unanimously</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-2">
+            {allMatches.map((match) => (
+              <div key={match.id} className="flex items-center justify-between p-3 border rounded-lg bg-primary/5">
+                <div className="flex-1">
+                  <p className="font-medium">{match.place_data.name}</p>
+                  <p className="text-sm text-muted-foreground">{match.place_data.type}</p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <Badge variant="secondary">
+                    <Heart className="w-3 h-3 mr-1" />
+                    {match.like_count}/{participantCount}
+                  </Badge>
+                  {match.is_final_choice && (
+                    <Badge variant="default">
+                      <PartyPopper className="w-3 h-3 mr-1" />
+                      Winner
+                    </Badge>
+                  )}
+                </div>
+              </div>
+            ))}
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Round Summary - shown at end of each round */}
+      {showRoundSummary && !isVoteMode && !gameEnded && (
+        <>
+          {roundMatches.length > 0 && (
+            <Card className="max-w-md mx-auto border-green-500 bg-green-50 dark:bg-green-950">
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2 text-green-700 dark:text-green-300">
+                  <PartyPopper className="w-5 h-5" />
+                  Round {round} Unanimous Matches! ({roundMatches.length})
+                </CardTitle>
+                <CardDescription>Everyone agreed on these places</CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-2">
+                {roundMatches.map((match) => (
+                  <div
+                    key={match.id}
+                    className="flex items-center justify-between p-3 border border-green-300 rounded-lg bg-white dark:bg-green-900"
+                  >
+                    <div className="flex-1">
+                      <p className="font-medium">{match.place_data.name}</p>
+                      <p className="text-sm text-muted-foreground">{match.place_data.type}</p>
+                    </div>
+                    <Badge variant="secondary" className="bg-green-100 dark:bg-green-800">
+                      <Heart className="w-3 h-3 mr-1" />
+                      {match.like_count}/{participantCount}
+                    </Badge>
+                  </div>
+                ))}
+              </CardContent>
+            </Card>
+          )}
+
+          {currentRoundCandidates.length > 0 && (
+            <Card className="max-w-md mx-auto border-primary">
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2">
+                  <Sparkles className="w-5 h-5 text-primary" />
+                  Advancing to Next Round ({currentRoundCandidates.length})
+                </CardTitle>
+                <CardDescription>Places that received likes but not unanimous</CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                {currentRoundCandidates.map((place) => (
+                  <div key={place.id} className="flex items-center justify-between p-3 border rounded-lg">
+                    <div className="flex-1">
+                      <p className="font-medium">{place.name}</p>
+                      <p className="text-sm text-muted-foreground">{place.type}</p>
+                    </div>
+                    <Badge variant="secondary">
+                      <Heart className="w-3 h-3 mr-1" />
+                      {swipeCounts[place.id] || 0}/{participantCount}
+                    </Badge>
+                  </div>
+                ))}
+                {isHost ? (
+                  <Button onClick={advanceToNextRound} className="w-full">
+                    {nextAction === "vote"
+                      ? "Start Final Vote"
+                      : nextAction === "end"
+                        ? "Finish"
+                        : `Start Round ${round + 1}`}
+                  </Button>
+                ) : (
+                  <div className="p-4 border border-primary rounded-lg bg-primary/5 text-center">
+                    <p className="text-sm font-medium">
+                      {nextAction === "vote"
+                        ? "Waiting for host to start final vote..."
+                        : "Waiting for host to start next round..."}
+                    </p>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          )}
+        </>
+      )}
+
+      <div className="flex justify-center">
+        {isVoteMode && !gameEnded ? (
+          <Card className="w-full max-w-md">
+            <CardHeader>
+              <CardTitle>Cast Your Vote!</CardTitle>
+              <CardDescription>Select your favorite from the final options</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              {currentRoundCandidates.map((place) => (
+                <Button
+                  key={place.id}
+                  variant="outline"
+                  className="w-full h-auto flex-col items-start p-4 hover:border-primary"
+                  onClick={() => handleVote(place)}
+                  disabled={isLoading}
+                >
+                  <p className="font-semibold text-lg">{place.name}</p>
+                  <p className="text-sm text-muted-foreground">{place.type}</p>
+                  <p className="text-xs text-muted-foreground mt-1">{place.address}</p>
+                </Button>
+              ))}
+            </CardContent>
+          </Card>
+        ) : gameEnded ? (
+          <Card className="w-full max-w-md">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                {allMatches.some((m) => m.is_final_choice) ? (
+                  <>
+                    <PartyPopper className="w-5 h-5 text-primary" />
+                    Winner Selected! 🎉
+                  </>
+                ) : (
+                  "Game Ended"
+                )}
+              </CardTitle>
+              <CardDescription>
+                {allMatches.some((m) => m.is_final_choice)
+                  ? "Check the winner above!"
+                  : "No agreement was reached. Better luck next time!"}
+              </CardDescription>
+            </CardHeader>
+          </Card>
+        ) : currentPlace && !showRoundSummary ? (
+          <SwipeCard
+            place={currentPlace}
+            onSwipeLeft={() => handleSwipe("left")}
+            onSwipeRight={() => handleSwipe("right")}
+          />
+        ) : null}
+      </div>
     </div>
   );
 };
