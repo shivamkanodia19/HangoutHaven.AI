@@ -151,6 +151,7 @@ export type Database = {
           id: string
           place_data: Json
           place_id: string
+          round: number | null
           session_id: string
           user_id: string
         }
@@ -160,6 +161,7 @@ export type Database = {
           id?: string
           place_data: Json
           place_id: string
+          round?: number | null
           session_id: string
           user_id: string
         }
@@ -169,6 +171,7 @@ export type Database = {
           id?: string
           place_data?: Json
           place_id?: string
+          round?: number | null
           session_id?: string
           user_id?: string
         }

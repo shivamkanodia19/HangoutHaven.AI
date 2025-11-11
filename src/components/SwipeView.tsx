@@ -91,10 +91,10 @@ const SwipeView = ({ sessionId, sessionCode, recommendations, onBack }: SwipeVie
     setParticipantCount(list.length);
   };
 
-  // Subscribe to session updates to sync round progression
+  // Single unified realtime channel for all updates
   useEffect(() => {
-    const sessionChannel = supabase
-      .channel(`session_sync_${sessionId}`)
+    const channel = supabase
+      .channel(`session_updates_${sessionId}`)
       .on(
         "postgres_changes",
         {
@@ -104,42 +104,21 @@ const SwipeView = ({ sessionId, sessionCode, recommendations, onBack }: SwipeVie
           filter: `id=eq.${sessionId}`,
         },
         () => {
-          // Session updated, reload state
           checkRoundCompletion();
         },
       )
-      .subscribe();
-
-    const matchChannel = supabase
-      .channel(`session_matches_${sessionId}`)
       .on(
         "postgres_changes",
         {
-          event: "INSERT",
+          event: "*",
           schema: "public",
           table: "session_matches",
           filter: `session_id=eq.${sessionId}`,
         },
         () => {
-          loadMatches(); // Reload all matches silently
+          loadMatches();
         },
       )
-      .on(
-        "postgres_changes",
-        {
-          event: "UPDATE",
-          schema: "public",
-          table: "session_matches",
-          filter: `session_id=eq.${sessionId}`,
-        },
-        () => {
-          loadMatches(); // Reload when matches are updated
-        },
-      )
-      .subscribe();
-
-    const participantsChannel = supabase
-      .channel(`participants_${sessionId}`)
       .on(
         "postgres_changes",
         {
@@ -153,10 +132,6 @@ const SwipeView = ({ sessionId, sessionCode, recommendations, onBack }: SwipeVie
           await checkRoundCompletion();
         },
       )
-      .subscribe();
-
-    const swipeChannel = supabase
-      .channel(`session_swipes_${sessionId}`)
       .on(
         "postgres_changes",
         {
@@ -173,10 +148,7 @@ const SwipeView = ({ sessionId, sessionCode, recommendations, onBack }: SwipeVie
       .subscribe();
 
     return () => {
-      supabase.removeChannel(sessionChannel);
-      supabase.removeChannel(matchChannel);
-      supabase.removeChannel(participantsChannel);
-      supabase.removeChannel(swipeChannel);
+      supabase.removeChannel(channel);
     };
   }, [sessionId]);
 
@@ -189,37 +161,16 @@ const SwipeView = ({ sessionId, sessionCode, recommendations, onBack }: SwipeVie
     checkRoundCompletion();
   }, [debouncedDeckIds, debouncedParticipantIds, showRoundSummary, isVoteMode, gameEnded]);
 
-  const subscribeToSwipes = () => {
-    const swipeChannel = supabase
-      .channel(`session_swipes_${sessionId}`)
-      .on(
-        "postgres_changes",
-        {
-          event: "INSERT",
-          schema: "public",
-          table: "session_swipes",
-          filter: `session_id=eq.${sessionId}`,
-        },
-        () => {
-          // Reload swipe counts and check round completion when anyone swipes
-          loadSwipeCounts();
-          checkRoundCompletion();
-        },
-      )
-      .subscribe();
-
-    return () => {
-      supabase.removeChannel(swipeChannel);
-    };
-  };
 
   const loadSwipeCounts = async () => {
     const placeIds = deck.map((p) => p.id);
 
+    // Only count swipes from the current round
     const { data: swipes } = await supabase
       .from("session_swipes")
       .select("place_id, user_id")
       .eq("session_id", sessionId)
+      .eq("round", round)
       .eq("direction", "right")
       .in("place_id", placeIds);
 
@@ -267,11 +218,11 @@ const SwipeView = ({ sessionId, sessionCode, recommendations, onBack }: SwipeVie
     }
   };
 
-  // Initial load of matches and swipe counts
+  // Initial load of matches and swipe counts, reload when round changes
   useEffect(() => {
     loadMatches();
     loadSwipeCounts();
-  }, [sessionId]);
+  }, [sessionId, round]);
 
   const checkRoundCompletion = async () => {
     // Guard: prevent overlapping executions
@@ -418,20 +369,27 @@ const SwipeView = ({ sessionId, sessionCode, recommendations, onBack }: SwipeVie
     await supabase.from("sessions").update({ updated_at: new Date().toISOString() }).eq("id", sessionId);
 
     if (nextAction === "nextRound" && currentRoundCandidates.length > 0) {
+      // Properly reset state for new round
       setDeck(currentRoundCandidates);
       setCurrentIndex(0);
       setRound((prev) => prev + 1);
       setShowRoundSummary(false);
       setRoundMatches([]);
+      setCurrentRoundCandidates([]);
+      setSwipeCounts({});
       setNextAction(null);
       toast.success(`Round ${round + 1}: ${currentRoundCandidates.length} places to swipe!`);
       return;
     }
 
     if (nextAction === "vote") {
+      // Reset state for voting round
       setIsVoteMode(true);
       setShowRoundSummary(false);
+      setRoundMatches([]);
+      setSwipeCounts({});
       setNextAction(null);
+      setRound((prev) => prev + 1);
       toast.success(
         `Final vote! Choose between ${currentRoundCandidates.length} option${currentRoundCandidates.length > 1 ? "s" : ""}.`,
       );
@@ -458,13 +416,14 @@ const SwipeView = ({ sessionId, sessionCode, recommendations, onBack }: SwipeVie
       } = await supabase.auth.getUser();
       if (!user) throw new Error("Not authenticated");
 
-      // Check if swipe already exists
+      // Check if swipe already exists in this round
       const { data: existingSwipe } = await supabase
         .from("session_swipes")
         .select("id")
         .eq("session_id", sessionId)
         .eq("user_id", user.id)
         .eq("place_id", place.id)
+        .eq("round", round)
         .single();
 
       if (existingSwipe) {
@@ -479,6 +438,7 @@ const SwipeView = ({ sessionId, sessionCode, recommendations, onBack }: SwipeVie
         place_id: place.id,
         place_data: place as any,
         direction,
+        round,
       });
 
       setCurrentIndex((prev) => prev + 1);
@@ -498,26 +458,40 @@ const SwipeView = ({ sessionId, sessionCode, recommendations, onBack }: SwipeVie
       } = await supabase.auth.getUser();
       if (!user) throw new Error("Not authenticated");
 
-      // Record vote as a swipe
+      // Check if user already voted in this voting round
+      const { data: existingVote } = await supabase
+        .from("session_swipes")
+        .select("id")
+        .eq("session_id", sessionId)
+        .eq("user_id", user.id)
+        .eq("round", round)
+        .in("place_id", currentRoundCandidates.map((p) => p.id))
+        .single();
+
+      if (existingVote) {
+        toast.info("You already voted!");
+        return;
+      }
+
+      // Record vote as a swipe with round tracking
       await supabase.from("session_swipes").insert({
         session_id: sessionId,
         user_id: user.id,
         place_id: place.id,
         place_data: place as any,
         direction: "right",
+        round,
       });
 
       toast.success(`Voted for ${place.name}!`);
 
-      // Check if all participants have voted
+      // Check if all participants have voted in THIS round
       const { data: voteSwipes } = await supabase
         .from("session_swipes")
         .select("user_id")
         .eq("session_id", sessionId)
-        .in(
-          "place_id",
-          currentRoundCandidates.map((p) => p.id),
-        );
+        .eq("round", round)
+        .in("place_id", currentRoundCandidates.map((p) => p.id));
 
       const uniqueVoters = new Set(voteSwipes?.map((s) => s.user_id));
 
@@ -536,10 +510,12 @@ const SwipeView = ({ sessionId, sessionCode, recommendations, onBack }: SwipeVie
   const tallyFinalVotes = async () => {
     const placeIds = currentRoundCandidates.map((p) => p.id);
 
+    // Only count votes from the current voting round
     const { data: votes } = await supabase
       .from("session_swipes")
       .select("place_id")
       .eq("session_id", sessionId)
+      .eq("round", round)
       .eq("direction", "right")
       .in("place_id", placeIds);
 
