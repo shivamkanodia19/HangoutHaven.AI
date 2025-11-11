@@ -28,7 +28,7 @@ const handler = async (req: Request): Promise<Response> => {
 
     const emailResponse = await resend.emails.send({
       from: "Contact Form <onboarding@resend.dev>",
-      to: ["amritnair23@gmail.com", "shivrjv@gmail.com", "shivamkanodia77@gmail.com"],
+      to: [datify.ai.contact@gmail.com],
       replyTo: email,
       subject: `New Contact Form Submission from ${name}`,
       html: `
