@@ -25,7 +25,9 @@ const AppPage = () => {
   const [joinCode, setJoinCode] = useState("");
   const [participantsCount, setParticipantsCount] = useState<number>(1);
   const [isHost, setIsHost] = useState<boolean>(false);
+  const [sessionType, setSessionType] = useState<'date' | 'group'>('group');
   const [view, setView] = useState<'mode-select' | 'solo' | 'session-setup' | 'waiting' | 'swipe'>('mode-select');
+  
   useEffect(() => {
     // Check auth status
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -149,6 +151,7 @@ const AppPage = () => {
           radius: preferences.radius,
           activities: preferences.activities,
           food_preferences: preferences.foodPreferences,
+          session_type: sessionType,
         })
         .select()
         .single();
@@ -248,9 +251,9 @@ const AppPage = () => {
 
   if (view === 'mode-select') {
     return (
-      <div className="min-h-screen bg-background">
-        <header className="flex items-center justify-between px-6 py-4 border-b bg-card">
-          <h1 className="text-2xl font-bold">Place Finder</h1>
+      <div className="min-h-screen bg-gradient-to-br from-[hsl(200,90%,95%)] via-[hsl(320,80%,95%)] to-[hsl(340,80%,95%)]">
+        <header className="flex items-center justify-between px-6 py-4 border-b bg-card/80 backdrop-blur-sm">
+          <h1 className="text-2xl font-bold">Dateify</h1>
           <div className="flex items-center gap-2">
             <Button variant="outline" size="sm" onClick={() => navigate("/contact")}>
               <Mail className="h-4 w-4 mr-2" />
@@ -264,14 +267,14 @@ const AppPage = () => {
         </header>
         
         <div className="flex items-center justify-center p-4 min-h-[calc(100vh-80px)]">
-          <Card className="w-full max-w-md">
+          <Card className="w-full max-w-md shadow-xl">
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
                 <Users className="w-6 h-6" />
                 Choose Your Mode
               </CardTitle>
               <CardDescription>
-                Find places by yourself or collaborate with a friend
+                Find places for a date or group hangout
               </CardDescription>
             </CardHeader>
             <CardContent>
@@ -300,16 +303,35 @@ const AppPage = () => {
                 </TabsContent>
                 
                 <TabsContent value="create" className="space-y-4">
-                  <p className="text-sm text-muted-foreground">
-                    Configure your preferences to create a collaborative session
+                  <p className="text-sm text-muted-foreground mb-4">
+                    Choose your session type
                   </p>
-                  <Button
-                    onClick={() => setView('session-setup')}
-                    className="w-full"
-                  >
-                    <Plus className="w-4 h-4 mr-2" />
-                    Continue to Preferences
-                  </Button>
+                  <div className="grid grid-cols-2 gap-3">
+                    <Button
+                      variant={sessionType === 'date' ? 'default' : 'outline'}
+                      onClick={() => {
+                        setSessionType('date');
+                        setView('session-setup');
+                      }}
+                      className="h-auto py-6 flex-col"
+                    >
+                      <span className="text-2xl mb-2">💑</span>
+                      <span className="font-semibold">Date</span>
+                      <span className="text-xs text-muted-foreground mt-1">2 people</span>
+                    </Button>
+                    <Button
+                      variant={sessionType === 'group' ? 'default' : 'outline'}
+                      onClick={() => {
+                        setSessionType('group');
+                        setView('session-setup');
+                      }}
+                      className="h-auto py-6 flex-col"
+                    >
+                      <span className="text-2xl mb-2">👥</span>
+                      <span className="font-semibold">Group</span>
+                      <span className="text-xs text-muted-foreground mt-1">Up to 10</span>
+                    </Button>
+                  </div>
                 </TabsContent>
               </Tabs>
               
@@ -330,8 +352,9 @@ const AppPage = () => {
   }
 
   if (view === 'waiting' && sessionCode) {
+    const maxParticipants = sessionType === 'date' ? 2 : 10;
     return (
-      <div className="min-h-screen bg-background p-4">
+      <div className="min-h-screen bg-gradient-to-br from-[hsl(200,90%,95%)] via-[hsl(320,80%,95%)] to-[hsl(340,80%,95%)] p-4">
         <div className="max-w-md mx-auto">
           <Card className="animate-enter">
             <CardHeader>
@@ -341,7 +364,7 @@ const AppPage = () => {
               </CardTitle>
               <CardDescription>
                 {isHost 
-                  ? `${participantsCount}/10 participants. Start when ready or wait until 10 join.`
+                  ? `${participantsCount}/${maxParticipants} participants. ${sessionType === 'date' ? 'Waiting for your date!' : `Start when ready or wait until ${maxParticipants} join.`}`
                   : 'Waiting for host to start the round...'}
               </CardDescription>
             </CardHeader>
@@ -353,11 +376,11 @@ const AppPage = () => {
                 </div>
               </div>
               <p className="text-center text-muted-foreground">
-                {participantsCount} of 10 participant{participantsCount !== 1 ? 's' : ''} joined
-                {participantsCount === 10 && ' - Starting automatically!'}
+                {participantsCount} of {maxParticipants} participant{participantsCount !== 1 ? 's' : ''} joined
+                {participantsCount === maxParticipants && ' - Starting automatically!'}
               </p>
               <div className="flex gap-2 justify-center">
-              {isHost && participantsCount >= 1 && participantsCount < 10 && (
+              {isHost && participantsCount >= (sessionType === 'date' ? 2 : 1) && participantsCount < maxParticipants && (
                   <Button onClick={handleStartRound} className="flex-1">
                     Start Round ({participantsCount} player{participantsCount !== 1 ? 's' : ''})
                   </Button>
@@ -391,18 +414,18 @@ const AppPage = () => {
 
   if (view === 'session-setup') {
     return (
-      <div className="flex h-screen overflow-hidden">
+      <div className="flex h-screen overflow-hidden bg-gradient-to-br from-[hsl(200,90%,95%)] via-[hsl(320,80%,95%)] to-[hsl(340,80%,95%)]">
         <PreferencesPanel 
           onRecommendationsGenerated={setRecommendations}
           onCreateSession={handleCreateSession}
           sessionMode={true}
         />
         <div className="flex-1 flex items-center justify-center p-8">
-          <Card className="max-w-md">
+          <Card className="max-w-md shadow-xl">
             <CardHeader>
-              <CardTitle>Collaborative Session</CardTitle>
+              <CardTitle>{sessionType === 'date' ? '💑 Date Night' : '👥 Group Hangout'}</CardTitle>
               <CardDescription>
-                Set your preferences to create a session. You'll get a code to share with a friend, and you can both swipe on places together!
+                Set your preferences to create a {sessionType === 'date' ? 'date session for 2 people' : 'group session for up to 10 people'}. You'll get a code to share!
               </CardDescription>
             </CardHeader>
             <CardContent>
@@ -417,9 +440,9 @@ const AppPage = () => {
   }
 
   return (
-    <div className="flex flex-col h-screen bg-background overflow-hidden">
-      <header className="flex items-center justify-between px-6 py-4 border-b bg-card">
-        <h1 className="text-2xl font-bold">Place Finder</h1>
+    <div className="flex flex-col h-screen bg-gradient-to-br from-[hsl(200,90%,95%)] via-[hsl(320,80%,95%)] to-[hsl(340,80%,95%)] overflow-hidden">
+      <header className="flex items-center justify-between px-6 py-4 border-b bg-card/80 backdrop-blur-sm">
+        <h1 className="text-2xl font-bold">Dateify</h1>
         <div className="flex items-center gap-2">
           <Button variant="outline" size="sm" onClick={() => setView('mode-select')}>
             Back to Modes

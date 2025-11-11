@@ -195,6 +195,7 @@ export type Database = {
           id: string
           radius: number
           session_code: string
+          session_type: string
           start_address: string
           started_at: string | null
           status: string
@@ -209,6 +210,7 @@ export type Database = {
           id?: string
           radius?: number
           session_code: string
+          session_type?: string
           start_address: string
           started_at?: string | null
           status?: string
@@ -223,6 +225,7 @@ export type Database = {
           id?: string
           radius?: number
           session_code?: string
+          session_type?: string
           start_address?: string
           started_at?: string | null
           status?: string
@@ -254,6 +257,7 @@ export type Database = {
           id: string
           radius: number
           session_code: string
+          session_type: string
           start_address: string
           started_at: string | null
           status: string
