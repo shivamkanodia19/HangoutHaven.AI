@@ -182,6 +182,13 @@ const SwipeView = ({ sessionId, sessionCode, recommendations, onBack }: SwipeVie
     checkRoundCompletion();
   }, [currentIndex, deck.length, participantCount]);
 
+  // Also re-check when deck or participant list changes to avoid race conditions
+  useEffect(() => {
+    if (!deck.length || !participantUserIds.length) return;
+    if (showRoundSummary || isVoteMode || gameEnded) return; // don't recalc during summary or after end
+    checkRoundCompletion();
+  }, [deck, participantUserIds, showRoundSummary, isVoteMode, gameEnded]);
+
   const subscribeToSwipes = () => {
     const swipeChannel = supabase
       .channel(`session_swipes_${sessionId}`)
@@ -309,7 +316,10 @@ const SwipeView = ({ sessionId, sessionCode, recommendations, onBack }: SwipeVie
     });
 
     const allParticipantsCompleted = expectedIds.length > 0 &&
-      expectedIds.every((uid) => (swipesByUser[uid]?.size || 0) === placeIds.length);
+      expectedIds.every((uid) => {
+        const userSet = swipesByUser[uid] || new Set<string>();
+        return placeIds.every((pid) => userSet.has(pid));
+      });
 
     if (!allParticipantsCompleted) {
       // Not everyone has finished swiping yet
