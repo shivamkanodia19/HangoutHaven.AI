@@ -22,9 +22,9 @@ const Landing = () => {
         
         <div className="relative z-10 max-w-6xl mx-auto px-4 py-20 text-center">
           <div className="mb-8 inline-block animate-fade-in">
-            <div className="flex items-center justify-center gap-3 mb-4">
-              <Heart className="w-16 h-16 text-primary fill-primary animate-pulse" />
-              <h1 className="text-8xl font-bold bg-gradient-to-r from-primary to-secondary bg-clip-text text-transparent mx-0 my-px py-[15px]">
+            <div className="flex items-center justify-center gap-4 mb-6 px-4">
+              <Heart className="w-14 h-14 md:w-16 md:h-16 text-primary fill-primary animate-pulse flex-shrink-0" />
+              <h1 className="text-6xl md:text-7xl lg:text-8xl font-poppins font-bold bg-gradient-to-r from-primary to-secondary bg-clip-text text-transparent">
                 Dateify
               </h1>
             </div>
