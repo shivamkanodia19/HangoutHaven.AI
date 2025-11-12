@@ -72,7 +72,7 @@ const Landing = () => {
               <p className="text-foreground/80 font-medium">Match Accuracy</p>
             </div>
             <div className="bg-white/60 backdrop-blur-md rounded-3xl p-8 shadow-xl hover:shadow-2xl transition-all hover:scale-105">
-              <div className="text-5xl font-bold bg-gradient-to-r from-primary to-secondary bg-clip-text text-transparent mb-2">
+              <div className="text-7xl font-bold bg-gradient-to-r from-primary to-secondary bg-clip-text text-transparent mb-2">
                 ∞
               </div>
               <p className="text-foreground/80 font-medium">Perfect Dates</p>
