@@ -53,8 +53,7 @@ const Landing = () => {
             </Button>
             <Button 
               size="lg" 
-              variant="ghost" 
-              className="text-lg px-10 py-7 hover:bg-white/30 transition-all"
+              className="text-lg px-10 py-7 bg-gradient-to-r from-primary to-secondary hover:opacity-90 transition-all hover:scale-105 shadow-lg"
               onClick={() => document.getElementById("features")?.scrollIntoView({ behavior: "smooth" })}
             >
               Learn More
