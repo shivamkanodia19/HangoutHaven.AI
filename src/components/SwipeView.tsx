@@ -108,9 +108,48 @@ const SwipeView = ({ sessionId, sessionCode, recommendations, onBack }: SwipeVie
           
           // Check if host advanced the round
           if (newSession.current_round && newSession.current_round > round) {
-            console.log(`Host advanced round from ${round} to ${newSession.current_round}`);
+            console.log(`Round advanced from ${round} to ${newSession.current_round}`);
             
-            // Get current swipes to build round summary
+            // If we're already showing summary, host clicked advance - sync to new round
+            if (showRoundSummary) {
+              console.log("Host clicked advance, syncing to new round");
+              
+              // Merge current round matches into all matches
+              const newAllMatches = [...allMatches, ...roundMatches];
+              setAllMatches(newAllMatches);
+              
+              // Check what action to take based on current state
+              if (nextAction === "nextRound" && currentRoundCandidates.length > 0) {
+                // Advance to next round with candidates
+                setDeck(currentRoundCandidates);
+                setCurrentIndex(0);
+                setRound(newSession.current_round);
+                setShowRoundSummary(false);
+                setRoundMatches([]);
+                setCurrentRoundCandidates([]);
+                setSwipeCounts({});
+                setNextAction(null);
+                toast.success(`Round ${newSession.current_round}: ${currentRoundCandidates.length} places to swipe!`);
+              } else if (nextAction === "vote") {
+                // Start voting mode
+                setIsVoteMode(true);
+                setShowRoundSummary(false);
+                setRoundMatches([]);
+                setSwipeCounts({});
+                setNextAction(null);
+                setRound(newSession.current_round);
+                toast.success(`Final vote! Choose between ${currentRoundCandidates.length} options.`);
+              } else if (nextAction === "end") {
+                // End game
+                setGameEnded(true);
+                setShowRoundSummary(false);
+                setNextAction(null);
+                toast.success("All decisions made!");
+              }
+              return;
+            }
+            
+            // Not showing summary yet - build it from current round data
             const deckPlaceIds = deck.map((p) => p.id);
             
             const { data: swipes } = await supabase
@@ -184,10 +223,7 @@ const SwipeView = ({ sessionId, sessionCode, recommendations, onBack }: SwipeVie
               setNextAction("end");
             }
             
-            // Don't show toast if we're already showing the summary (host triggered this)
-            if (!showRoundSummary) {
-              toast.info("Host ended the round");
-            }
+            toast.info("Host ended the round");
           } else {
             checkRoundCompletion();
           }
