@@ -1,14 +1,9 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
-import { z } from "https://deno.land/x/zod@v3.22.4/mod.ts";
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
-
-const inputSchema = z.object({
-  input: z.string().min(1, "Input cannot be empty").max(500, "Input must be less than 500 characters"),
-});
 
 serve(async (req) => {
   if (req.method === 'OPTIONS') {
@@ -16,8 +11,7 @@ serve(async (req) => {
   }
 
   try {
-    const body = await req.json();
-    const { input } = inputSchema.parse(body);
+    const { input } = await req.json();
     
     const GOOGLE_PLACES_API_KEY = Deno.env.get('GOOGLE_PLACES_API_KEY');
     if (!GOOGLE_PLACES_API_KEY) {
@@ -39,18 +33,6 @@ serve(async (req) => {
     });
   } catch (error) {
     console.error('Error in autocomplete-address function:', error);
-    
-    if (error instanceof z.ZodError) {
-      return new Response(JSON.stringify({ 
-        error: 'Invalid input',
-        details: error.errors,
-        predictions: []
-      }), {
-        status: 400,
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-      });
-    }
-    
     return new Response(JSON.stringify({ 
       error: error instanceof Error ? error.message : 'Unknown error occurred',
       predictions: []

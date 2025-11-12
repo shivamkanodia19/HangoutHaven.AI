@@ -1,17 +1,9 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
-import { z } from "https://deno.land/x/zod@v3.22.4/mod.ts";
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
-
-const recommendationsSchema = z.object({
-  startAddress: z.string().min(1, "Address cannot be empty").max(500, "Address must be less than 500 characters"),
-  radius: z.number().min(1, "Radius must be at least 1 mile").max(50, "Radius cannot exceed 50 miles"),
-  activities: z.string().max(1000, "Activities must be less than 1000 characters").optional(),
-  foodPreferences: z.string().max(1000, "Food preferences must be less than 1000 characters").optional(),
-});
 
 serve(async (req) => {
   if (req.method === 'OPTIONS') {
@@ -19,8 +11,7 @@ serve(async (req) => {
   }
 
   try {
-    const body = await req.json();
-    const { startAddress, radius, activities, foodPreferences } = recommendationsSchema.parse(body);
+    const { startAddress, radius, activities, foodPreferences } = await req.json();
     console.log('Generating recommendations for:', { startAddress, radius, activities, foodPreferences });
 
     const LOVABLE_API_KEY = Deno.env.get('LOVABLE_API_KEY');
@@ -163,17 +154,6 @@ Return ONLY a valid JSON array with this exact structure, no additional text:
     });
   } catch (error) {
     console.error('Error in generate-recommendations function:', error);
-    
-    if (error instanceof z.ZodError) {
-      return new Response(JSON.stringify({ 
-        error: 'Invalid input',
-        details: error.errors
-      }), {
-        status: 400,
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-      });
-    }
-    
     return new Response(JSON.stringify({ 
       error: error instanceof Error ? error.message : 'Unknown error occurred' 
     }), {
