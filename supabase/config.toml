@@ -1,7 +1,1 @@
 project_id = "yxyngiirdiksakmodhuu"
-
-[functions.generate-recommendations]
-verify_jwt = false
-
-[functions.autocomplete-address]
-verify_jwt = false
