@@ -167,22 +167,12 @@ const AppPage = () => {
 
 
       // Generate recommendations
-      const response = await fetch(
-        `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/generate-recommendations`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY}`,
-          },
-          body: JSON.stringify(preferences),
-        }
-      );
+      const { data: recData, error: recError } = await supabase.functions.invoke('generate-recommendations', {
+        body: preferences,
+      });
+      if (recError) throw recError;
 
-      if (!response.ok) throw new Error('Failed to generate recommendations');
-
-      const data = await response.json();
-      setRecommendations(data.places);
+      setRecommendations((recData as any).places);
       setSessionId(session.id);
       setSessionCode(code);
       toast.success(`Session created! Code: ${code}`);
@@ -221,27 +211,17 @@ const AppPage = () => {
       }
 
       // Generate recommendations based on session preferences
-      const response = await fetch(
-        `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/generate-recommendations`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY}`,
-          },
-          body: JSON.stringify({
-            startAddress: session.start_address,
-            radius: session.radius,
-            activities: session.activities,
-            foodPreferences: session.food_preferences,
-          }),
-        }
-      );
+      const { data: recData, error: recError } = await supabase.functions.invoke('generate-recommendations', {
+        body: {
+          startAddress: session.start_address,
+          radius: session.radius,
+          activities: session.activities,
+          foodPreferences: session.food_preferences,
+        },
+      });
+      if (recError) throw recError;
 
-      if (!response.ok) throw new Error('Failed to generate recommendations');
-
-      const data = await response.json();
-      setRecommendations(data.places);
+      setRecommendations((recData as any).places);
       setSessionId(session.id);
       setSessionCode(session.session_code);
       toast.success("Joined session successfully!");

@@ -151,21 +151,13 @@ const AppDates = () => {
 
       if (error) throw error;
 
-      const response = await fetch(
-        `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/generate-recommendations`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY}`,
-          },
-          body: JSON.stringify(preferences),
-        }
-      );
+      const { data: recData, error: recError } = await supabase.functions.invoke('generate-recommendations', {
+        body: preferences,
+      });
 
-      if (!response.ok) throw new Error('Failed to generate recommendations');
+      if (recError) throw recError;
 
-      const data = await response.json();
+      const data = recData as any;
       setRecommendations(data.places);
       setSessionId(session.id);
       setSessionCode(code);
@@ -207,26 +199,18 @@ const AppDates = () => {
         return;
       }
 
-      const response = await fetch(
-        `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/generate-recommendations`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY}`,
-          },
-          body: JSON.stringify({
-            startAddress: session.start_address,
-            radius: session.radius,
-            activities: session.activities,
-            foodPreferences: session.food_preferences,
-          }),
-        }
-      );
+      const { data: recData, error: recError } = await supabase.functions.invoke('generate-recommendations', {
+        body: {
+          startAddress: session.start_address,
+          radius: session.radius,
+          activities: session.activities,
+          foodPreferences: session.food_preferences,
+        },
+      });
 
-      if (!response.ok) throw new Error('Failed to generate recommendations');
+      if (recError) throw recError;
 
-      const data = await response.json();
+      const data = recData as any;
       setRecommendations(data.places);
       setSessionId(session.id);
       setSessionCode(session.session_code);

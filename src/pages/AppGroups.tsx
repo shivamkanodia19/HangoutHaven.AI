@@ -151,17 +151,12 @@ const AppGroups = () => {
 
       if (error) throw error;
 
-      const response = await fetch(
-        `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/generate-recommendations`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY}`,
-          },
-          body: JSON.stringify(preferences),
-        }
-      );
+      const { data: recData, error: recError } = await supabase.functions.invoke('generate-recommendations', {
+        body: preferences,
+      });
+      if (recError) throw recError;
+
+      const data = recData as any;
 
       if (!response.ok) throw new Error('Failed to generate recommendations');
 

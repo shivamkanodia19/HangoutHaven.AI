@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from "react";
 import { Input } from "@/components/ui/input";
 import { Command, CommandGroup, CommandItem, CommandList } from "@/components/ui/command";
 import { MapPin } from "lucide-react";
-
+import { supabase } from "@/lib/supabaseClient";
 interface AddressAutocompleteProps {
   value: string;
   onChange: (value: string) => void;
@@ -32,23 +32,15 @@ const AddressAutocomplete = ({ value, onChange, onSelect, placeholder }: Address
 
     debounceTimer.current = setTimeout(async () => {
       try {
-        const response = await fetch(
-          `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/autocomplete-address`,
-          {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'Authorization': `Bearer ${import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY}`,
-            },
-            body: JSON.stringify({ input: value }),
-          }
-        );
+        const { data, error } = await supabase.functions.invoke('autocomplete-address', {
+          body: { input: value },
+        });
 
-        if (response.ok) {
-          const data = await response.json();
-          setSuggestions(data.predictions || []);
+        if (!error) {
+          setSuggestions((data as any)?.predictions || []);
           setShowSuggestions(true);
         }
+
       } catch (error) {
         console.error('Error fetching address suggestions:', error);
       }

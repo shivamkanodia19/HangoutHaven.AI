@@ -7,6 +7,7 @@ import { MapPin, Activity, UtensilsCrossed } from "lucide-react";
 import { Place } from "@/types/place";
 import { toast } from "sonner";
 import AddressAutocomplete from "./AddressAutocomplete";
+import { supabase } from "@/lib/supabaseClient";
 
 interface PreferencesPanelProps {
   onRecommendationsGenerated: (places: Place[], sessionId?: string, sessionCode?: string) => void;
@@ -45,30 +46,20 @@ const PreferencesPanel = ({ onRecommendationsGenerated, onCreateSession, session
         return;
       }
 
-      const response = await fetch(
-        `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/generate-recommendations`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY}`,
-          },
-          body: JSON.stringify({
-            startAddress,
-            radius,
-            activities,
-            foodPreferences,
-          }),
-        }
-      );
+      const { data, error } = await supabase.functions.invoke('generate-recommendations', {
+        body: {
+          startAddress,
+          radius,
+          activities,
+          foodPreferences,
+        },
+      });
 
-      if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.error || 'Failed to generate recommendations');
+      if (error) {
+        throw error;
       }
 
-      const data = await response.json();
-      onRecommendationsGenerated(data.places);
+      onRecommendationsGenerated((data as any).places);
       toast.success("Recommendations generated!");
     } catch (error) {
       console.error('Error generating recommendations:', error);
