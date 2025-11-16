@@ -8,7 +8,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { useToast } from "@/hooks/use-toast";
 import { ArrowLeft } from "lucide-react";
 import { z } from "zod";
-import { supabase } from "@/integrations/supabase/client";
+
 
 const contactSchema = z.object({
   name: z.string().min(2, "Name must be at least 2 characters").max(100, "Name must be less than 100 characters"),
@@ -35,11 +35,24 @@ const Contact = () => {
     try {
       const validatedData = contactSchema.parse(formData);
       
-      const { error } = await supabase.functions.invoke('send-contact-email', {
-        body: validatedData,
+      const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
+      const supabaseKey = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY;
+      if (!supabaseUrl || !supabaseKey) {
+        throw new Error("Backend not configured. Missing VITE_SUPABASE_URL or VITE_SUPABASE_PUBLISHABLE_KEY.");
+      }
+      const response = await fetch(`${supabaseUrl}/functions/v1/send-contact-email`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${supabaseKey}`,
+        },
+        body: JSON.stringify(validatedData),
       });
 
-      if (error) throw error;
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({} as any));
+        throw new Error((errorData as any)?.error || 'Failed to send message');
+      }
 
       toast({
         title: "Message Sent!",
