@@ -2,7 +2,7 @@ import { Place } from "@/types/place";
 import PlaceCard from "./PlaceCard";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useState, useEffect } from "react";
-import { supabase } from "@/integrations/supabase/client";
+import { supabase } from "@/lib/supabaseClient";
 
 interface RecommendationsPanelProps {
   places: Place[];

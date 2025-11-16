@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Star, MapPin, Heart } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useState, useEffect } from "react";
-import { supabase } from "@/integrations/supabase/client";
+import { supabase } from "@/lib/supabaseClient";
 import { useToast } from "@/hooks/use-toast";
 
 interface PlaceCardProps {
