@@ -29,12 +29,45 @@ serve(async (req) => {
     );
 
     if (!response.ok) {
-      throw new Error('Failed to fetch address suggestions');
+      if (response.status === 403) {
+        return new Response(JSON.stringify({ 
+          error: 'Google Places API quota exceeded. Please try again later.',
+          predictions: []
+        }), {
+          status: 429,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      throw new Error(`Google Places API error: ${response.status}`);
     }
 
     const data = await response.json();
 
-    return new Response(JSON.stringify({ predictions: data.predictions }), {
+    // Handle Google API errors
+    if (data.status && data.status !== 'OK' && data.status !== 'ZERO_RESULTS') {
+      if (data.status === 'OVER_QUERY_LIMIT') {
+        return new Response(JSON.stringify({ 
+          error: 'Google Places API quota exceeded. Please try again later.',
+          predictions: []
+        }), {
+          status: 429,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      
+      return new Response(JSON.stringify({ 
+        error: `Google Places API error: ${data.status}`,
+        predictions: []
+      }), {
+        status: 400,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
+
+    return new Response(JSON.stringify({ 
+      predictions: data.predictions || [],
+      status: data.status || 'OK'
+    }), {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     });
   } catch (error) {

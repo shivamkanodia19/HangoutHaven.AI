@@ -1,5 +1,6 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { z } from "https://deno.land/x/zod@v3.22.4/mod.ts";
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2.39.3";
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -11,6 +12,18 @@ const recommendationsSchema = z.object({
   radius: z.number().min(1, "Radius must be at least 1 mile").max(50, "Radius cannot exceed 50 miles"),
   activities: z.string().max(1000, "Activities must be less than 1000 characters").optional(),
   foodPreferences: z.string().max(1000, "Food preferences must be less than 1000 characters").optional(),
+  useCache: z.boolean().optional().default(true), // Allow bypassing cache if needed
+});
+
+// Place validation schema
+const placeSchema = z.object({
+  id: z.string(),
+  name: z.string().min(1),
+  type: z.string().min(1),
+  rating: z.number().min(0).max(5).optional(),
+  description: z.string().min(1),
+  address: z.string().min(1),
+  highlights: z.array(z.string()).length(3).optional(),
 });
 
 serve(async (req) => {
@@ -20,8 +33,42 @@ serve(async (req) => {
 
   try {
     const body = await req.json();
-    const { startAddress, radius, activities, foodPreferences } = recommendationsSchema.parse(body);
-    console.log('Generating recommendations for:', { startAddress, radius, activities, foodPreferences });
+    const { startAddress, radius, activities, foodPreferences, useCache } = recommendationsSchema.parse(body);
+    console.log('Generating recommendations for:', { startAddress, radius, activities, foodPreferences, useCache });
+
+    // Initialize Supabase client for cache access
+    const supabaseUrl = Deno.env.get('SUPABASE_URL');
+    const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+    
+    let supabaseClient = null;
+    if (supabaseUrl && supabaseServiceKey) {
+      supabaseClient = createClient(supabaseUrl, supabaseServiceKey);
+    }
+
+    // Try to get from cache first (if enabled and Supabase is available)
+    if (useCache && supabaseClient) {
+      try {
+        const { data: cached, error: cacheError } = await supabaseClient.rpc(
+          'get_cached_recommendations',
+          {
+            p_start_address: startAddress,
+            p_radius: radius,
+            p_activities: activities || null,
+            p_food_preferences: foodPreferences || null,
+          }
+        );
+
+        if (!cacheError && cached && Array.isArray(cached) && cached.length > 0) {
+          console.log('Returning cached recommendations');
+          return new Response(JSON.stringify({ places: cached, cached: true }), {
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          });
+        }
+      } catch (cacheErr) {
+        console.warn('Cache lookup failed, proceeding with generation:', cacheErr);
+        // Continue to generate new recommendations
+      }
+    }
 
     const LOVABLE_API_KEY = Deno.env.get('LOVABLE_API_KEY');
     if (!LOVABLE_API_KEY) {
@@ -145,20 +192,91 @@ Return ONLY a valid JSON array with this exact structure, no additional text:
 
     console.log('Parsed places:', places);
 
+    // Validate and normalize places
+    if (!Array.isArray(places) || places.length === 0) {
+      throw new Error('AI returned invalid or empty places array');
+    }
+
     // Deduplicate by name + address combination to ensure unique locations
     const seenLocations = new Set<string>();
-    const uniquePlaces = places.filter((place: any) => {
-      const locationKey = `${place.name.toLowerCase().trim()}|${place.address.toLowerCase().trim()}`;
-      if (seenLocations.has(locationKey)) {
-        return false;
+    const uniquePlaces: any[] = [];
+    
+    for (const place of places) {
+      // Validate place structure
+      try {
+        const validatedPlace = placeSchema.parse(place);
+        const locationKey = `${validatedPlace.name.toLowerCase().trim()}|${validatedPlace.address.toLowerCase().trim()}`;
+        
+        if (!seenLocations.has(locationKey)) {
+          seenLocations.add(locationKey);
+          uniquePlaces.push({
+            id: validatedPlace.id,
+            name: validatedPlace.name.trim(),
+            type: validatedPlace.type.trim(),
+            rating: validatedPlace.rating ?? null,
+            description: validatedPlace.description.trim(),
+            address: validatedPlace.address.trim(),
+            highlights: validatedPlace.highlights || ['Popular', 'Highly Rated', 'Local Favorite'],
+          });
+        }
+      } catch (validationError) {
+        console.warn('Skipping invalid place:', place, validationError);
+        // Skip invalid places but continue processing
       }
-      seenLocations.add(locationKey);
-      return true;
-    });
+    }
 
-    console.log(`Filtered ${places.length} places to ${uniquePlaces.length} unique locations`);
+    if (uniquePlaces.length === 0) {
+      throw new Error('No valid places found after validation and deduplication');
+    }
 
-    return new Response(JSON.stringify({ places: uniquePlaces }), {
+    console.log(`Filtered ${places.length} places to ${uniquePlaces.length} unique valid locations`);
+
+    // Cache the results (if Supabase is available)
+    if (supabaseClient && useCache) {
+      try {
+        // Generate cache key
+        const { data: cacheKey, error: keyError } = await supabaseClient.rpc(
+          'generate_recommendation_cache_key',
+          {
+            p_start_address: startAddress,
+            p_radius: radius,
+            p_activities: activities || null,
+            p_food_preferences: foodPreferences || null,
+          }
+        );
+
+        if (!keyError && cacheKey) {
+          // Insert or update cache
+          const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(); // 7 days
+          const { error: upsertError } = await supabaseClient
+            .from('cached_recommendations')
+            .upsert({
+              cache_key: cacheKey,
+              start_address: startAddress,
+              radius: radius,
+              activities: activities || null,
+              food_preferences: foodPreferences || null,
+              recommendations: uniquePlaces,
+              hit_count: 0,
+              expires_at: expiresAt,
+              updated_at: new Date().toISOString(),
+            }, {
+              onConflict: 'cache_key',
+            });
+
+          if (upsertError) {
+            console.warn('Failed to upsert cache:', upsertError);
+          } else {
+            console.log('Successfully cached recommendations');
+          }
+        }
+      } catch (cacheErr) {
+        console.warn('Failed to cache recommendations:', cacheErr);
+        // Don't fail the request if caching fails
+      }
+    }
+
+    return new Response(JSON.stringify({ places: uniquePlaces, cached: false }), {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     });
   } catch (error) {
