@@ -1,4 +1,4 @@
-import { useEffect, useCallback } from 'react';
+import { useCallback } from 'react';
 
 interface ProgressData {
   sessionId: string;
@@ -8,14 +8,13 @@ interface ProgressData {
   timestamp: number;
 }
 
-const STORAGE_KEY_PREFIX = 'swipe_progress_';
-const MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours
-
 /**
- * Hook for persisting swipe progress to localStorage
+ * Hook for persisting swipe progress to sessionStorage
+ * Uses format: ${sessionId}_progress as the storage key
+ * sessionStorage automatically clears when the browser tab is closed
  */
 export function useProgressPersistence(sessionId: string) {
-  const storageKey = `${STORAGE_KEY_PREFIX}${sessionId}`;
+  const storageKey = `${sessionId}_progress`;
 
   // Save progress
   const saveProgress = useCallback(
@@ -28,9 +27,26 @@ export function useProgressPersistence(sessionId: string) {
           deck: deckIds,
           timestamp: Date.now(),
         };
-        localStorage.setItem(storageKey, JSON.stringify(progress));
+        sessionStorage.setItem(storageKey, JSON.stringify(progress));
       } catch (error) {
-        console.error('Failed to save progress:', error);
+        console.error('Failed to save progress to sessionStorage:', error);
+        // Handle quota exceeded errors gracefully
+        if (error instanceof DOMException && error.name === 'QuotaExceededError') {
+          console.warn('sessionStorage quota exceeded, clearing old progress');
+          try {
+            // Clear all old progress entries
+            const keys = Object.keys(sessionStorage);
+            keys.forEach((key) => {
+              if (key.endsWith('_progress')) {
+                sessionStorage.removeItem(key);
+              }
+            });
+            // Retry saving
+            sessionStorage.setItem(storageKey, JSON.stringify(progress));
+          } catch (retryError) {
+            console.error('Failed to retry saving progress:', retryError);
+          }
+        }
       }
     },
     [sessionId, storageKey]
@@ -39,28 +55,26 @@ export function useProgressPersistence(sessionId: string) {
   // Load progress
   const loadProgress = useCallback((): ProgressData | null => {
     try {
-      const stored = localStorage.getItem(storageKey);
+      const stored = sessionStorage.getItem(storageKey);
       if (!stored) return null;
 
       const progress: ProgressData = JSON.parse(stored);
 
-      // Check if progress is too old
-      const age = Date.now() - progress.timestamp;
-      if (age > MAX_AGE_MS) {
-        localStorage.removeItem(storageKey);
-        return null;
-      }
-
       // Verify it's for the same session
       if (progress.sessionId !== sessionId) {
-        localStorage.removeItem(storageKey);
+        sessionStorage.removeItem(storageKey);
         return null;
       }
 
       return progress;
     } catch (error) {
-      console.error('Failed to load progress:', error);
-      localStorage.removeItem(storageKey);
+      console.error('Failed to load progress from sessionStorage:', error);
+      // Remove invalid data
+      try {
+        sessionStorage.removeItem(storageKey);
+      } catch {
+        // Ignore errors when removing
+      }
       return null;
     }
   }, [sessionId, storageKey]);
@@ -68,37 +82,11 @@ export function useProgressPersistence(sessionId: string) {
   // Clear progress
   const clearProgress = useCallback(() => {
     try {
-      localStorage.removeItem(storageKey);
+      sessionStorage.removeItem(storageKey);
     } catch (error) {
-      console.error('Failed to clear progress:', error);
+      console.error('Failed to clear progress from sessionStorage:', error);
     }
   }, [storageKey]);
-
-  // Clear old progress on mount
-  useEffect(() => {
-    try {
-      const keys = Object.keys(localStorage);
-      keys.forEach((key) => {
-        if (key.startsWith(STORAGE_KEY_PREFIX)) {
-          try {
-            const stored = localStorage.getItem(key);
-            if (stored) {
-              const progress: ProgressData = JSON.parse(stored);
-              const age = Date.now() - progress.timestamp;
-              if (age > MAX_AGE_MS) {
-                localStorage.removeItem(key);
-              }
-            }
-          } catch {
-            // Invalid data, remove it
-            localStorage.removeItem(key);
-          }
-        }
-      });
-    } catch (error) {
-      console.error('Failed to clean old progress:', error);
-    }
-  }, []);
 
   return {
     saveProgress,

@@ -15,10 +15,9 @@ interface UseRoundCompletionOptions {
 export function useRoundCompletion({ sessionId, onComplete }: UseRoundCompletionOptions) {
   const isChecking = useRef(false);
   const abortControllerRef = useRef<AbortController | null>(null);
-  const lastVersionRef = useRef<number | null>(null);
 
   const checkRoundCompletion = useCallback(
-    async (deckPlaceIds: string[], roundNumber: number, expectedVersion?: number) => {
+    async (deckPlaceIds: string[], roundNumber: number) => {
       // Prevent overlapping checks
       if (isChecking.current) {
         return;
@@ -39,11 +38,11 @@ export function useRoundCompletion({ sessionId, onComplete }: UseRoundCompletion
         }
 
         // Call server-side atomic round completion RPC
+        // TODO: Add version column to sessions table for optimistic locking
         const { data, error } = await supabase.rpc('check_and_complete_round', {
           p_session_id: sessionId,
           p_deck_place_ids: deckPlaceIds,
           p_round_number: roundNumber,
-          p_expected_version: expectedVersion || lastVersionRef.current || null,
         });
 
         // Check if request was aborted
@@ -61,42 +60,15 @@ export function useRoundCompletion({ sessionId, onComplete }: UseRoundCompletion
           return;
         }
 
-        const result = data as RoundCompletionResult;
+        // Fix type casting with intermediate cast
+        const result = data as unknown as RoundCompletionResult;
 
-        // Handle version mismatch (race condition detected)
-        if (result.version_mismatch) {
-          console.warn('Version mismatch detected, refreshing session state');
-          toast.warning('Session was updated. Refreshing...');
-          
-          // Fetch latest session version and retry
-          const { data: sessionData } = await supabase
-            .from('sessions')
-            .select('version, current_round')
-            .eq('id', sessionId)
-            .single();
-
-          if (sessionData) {
-            lastVersionRef.current = sessionData.version;
-            // Retry with new version
-            return checkRoundCompletion(deckPlaceIds, roundNumber, sessionData.version);
-          }
-          return;
-        }
-
-        // Handle lock error
-        if (result.locked) {
-          console.warn('Session is locked, retrying shortly...');
-          // Retry after a short delay
-          setTimeout(() => {
-            checkRoundCompletion(deckPlaceIds, roundNumber, expectedVersion);
-          }, 500);
-          return;
-        }
-
-        // Store version for next check
-        if (result.version !== undefined) {
-          lastVersionRef.current = result.version;
-        }
+        // TODO: Add version mismatch handling when version column is added
+        // if (result.version_mismatch) {
+        //   console.warn('Version mismatch detected, refreshing session state');
+        //   toast.warning('Session was updated. Refreshing...');
+        //   return;
+        // }
 
         // If round not completed, exit early
         if (!result.completed) {
@@ -122,7 +94,6 @@ export function useRoundCompletion({ sessionId, onComplete }: UseRoundCompletion
   return {
     checkRoundCompletion,
     isChecking: isChecking.current,
-    currentVersion: lastVersionRef.current,
   };
 }
 

@@ -219,7 +219,7 @@ const SwipeView = ({ sessionId, sessionCode, recommendations, onBack }: SwipeVie
   }, [state, checkRoundCompletion]);
 
   // Unified real-time sync using hook
-  const { isConnected, isReconnecting } = useRealtimeSync({
+  const { isConnected } = useRealtimeSync({
     sessionId,
     onSessionUpdate: async (payload) => {
       const newSession = payload.new as any;
@@ -238,7 +238,7 @@ const SwipeView = ({ sessionId, sessionCode, recommendations, onBack }: SwipeVie
       // If final choice was set and game hasn't ended, end the game
       const match = payload.new as any;
       if (match.is_final_choice && !state.gameEnded) {
-        const winnerPlace = match.place_data as Place;
+        const winnerPlace = match.place_data as unknown as Place;
         if (winnerPlace) {
           actions.endGame(winnerPlace);
           toast.success(`🎉 Winner selected: ${winnerPlace.name}!`);
@@ -387,7 +387,7 @@ const SwipeView = ({ sessionId, sessionCode, recommendations, onBack }: SwipeVie
         session_id: sessionId,
         user_id: user.id,
         place_id: place.id,
-        place_data: place as any,
+        place_data: place as unknown as any,
         direction,
         round: state.round,
       });
@@ -401,19 +401,28 @@ const SwipeView = ({ sessionId, sessionCode, recommendations, onBack }: SwipeVie
     }
   }, [sessionId, state, actions]);
 
-  // Tally final votes using database function (atomic and deterministic)
+  // Tally final votes (temporary client-side until tally_final_votes RPC is created)
   // Defined before handleVote to avoid forward reference
   const tallyFinalVotes = useCallback(async () => {
     if (!state.isHost) return; // Only host should tally to avoid duplicates
     
     const placeIds = state.advancingCandidates.map((p) => p.id);
 
-    // Use database function for atomic vote tallying with deterministic tiebreaker
-    const { data, error } = await supabase.rpc('tally_final_votes', {
-      p_session_id: sessionId,
-      p_candidate_place_ids: placeIds,
-      p_round_number: state.round,
-    });
+    // TODO: Replace with database function for atomic vote tallying with deterministic tiebreaker
+    // const { data, error } = await supabase.rpc('tally_final_votes', {
+    //   p_session_id: sessionId,
+    //   p_candidate_place_ids: placeIds,
+    //   p_round_number: state.round,
+    // });
+
+    // Temporary client-side tallying (has race condition risks)
+    const { data: votes, error } = await supabase
+      .from("session_swipes")
+      .select("place_id, user_id")
+      .eq("session_id", sessionId)
+      .eq("round", state.round)
+      .eq("direction", "right")
+      .in("place_id", placeIds);
 
     if (error) {
       console.error('Error tallying votes:', error);
@@ -421,42 +430,79 @@ const SwipeView = ({ sessionId, sessionCode, recommendations, onBack }: SwipeVie
       return;
     }
 
-    if (!data) {
-      toast.error('No winner determined');
+    if (!votes || votes.length === 0) {
+      toast.error('No votes recorded!');
       return;
     }
 
-    const result = data as {
-      winner_place_id: string;
-      winner_place_data: Place;
-      vote_count: number;
-      participant_count: number;
-      was_tie: boolean;
-      tie_breaker_used: boolean;
-    };
+    // Count votes per place (counting unique users per place)
+    const voteCounts: Record<string, Set<string>> = {};
+    votes.forEach((v) => {
+      if (!voteCounts[v.place_id]) {
+        voteCounts[v.place_id] = new Set();
+      }
+      voteCounts[v.place_id].add(v.user_id);
+    });
 
-    const winner = result.winner_place_data;
+    const voteCountsMap: Record<string, number> = {};
+    Object.keys(voteCounts).forEach((placeId) => {
+      voteCountsMap[placeId] = voteCounts[placeId].size;
+    });
 
-    // Show tie message if applicable
-    if (result.was_tie && result.tie_breaker_used) {
+    // Find winner(s) - handle ties
+    const maxVotes = Math.max(...Object.values(voteCountsMap));
+    const winners = state.advancingCandidates.filter(
+      (p) => voteCountsMap[p.id] === maxVotes
+    );
+
+    // If tie, use deterministic random selection based on sessionId hash
+    let winner: Place;
+    let wasTie = false;
+    if (winners.length > 1) {
+      wasTie = true;
+      // Use session ID hash for deterministic random selection across all participants
+      const hash = sessionId.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0);
+      const index = hash % winners.length;
+      winner = winners[index];
       toast.info(`Tie detected! Randomly selected: ${winner.name}`);
+    } else {
+      winner = winners[0];
     }
 
-    // Update all matches with winner
+    // Create or update match as final choice
     const winnerMatch = state.allMatches.find((m) => m.place_id === winner.id);
     
-    if (!winnerMatch) {
-      // Create new match entry in state
-      actions.addToAllMatches([{
-        id: `match-${winner.id}`,
-        place_id: winner.id,
-        place_data: winner,
-        is_final_choice: true,
-        like_count: result.vote_count,
-      }]);
+    if (winnerMatch) {
+      // Update existing match
+      await supabase
+        .from("session_matches")
+        .update({ is_final_choice: true })
+        .eq("id", winnerMatch.id);
+    } else {
+      // Create new match
+      const { data: newMatch } = await supabase
+        .from("session_matches")
+        .insert({
+          session_id: sessionId,
+          place_id: winner.id,
+          place_data: winner as unknown as any,
+          is_final_choice: true,
+        })
+        .select()
+        .single();
+
+      if (newMatch) {
+        actions.addToAllMatches([{
+          id: newMatch.id,
+          place_id: winner.id,
+          place_data: winner,
+          is_final_choice: true,
+          like_count: voteCountsMap[winner.id] || 0,
+        }]);
+      }
     }
 
-    toast.success(`🎉 Winner: ${winner.name} with ${result.vote_count} votes!`);
+    toast.success(`🎉 Winner: ${winner.name} with ${voteCountsMap[winner.id]} votes!`);
     actions.endGame(winner);
   }, [sessionId, state, actions]);
 
@@ -495,7 +541,7 @@ const SwipeView = ({ sessionId, sessionCode, recommendations, onBack }: SwipeVie
         session_id: sessionId,
         user_id: user.id,
         place_id: place.id,
-        place_data: place as any,
+        place_data: place as unknown as any,
         direction: "right",
         round: state.round,
       });
@@ -614,11 +660,6 @@ const SwipeView = ({ sessionId, sessionCode, recommendations, onBack }: SwipeVie
             <Badge variant="outline" className="text-xs border-green-500 text-green-700 bg-green-50 flex items-center">
               <Wifi className="w-3 h-3 mr-1" />
               Connected
-            </Badge>
-          ) : isReconnecting ? (
-            <Badge variant="outline" className="text-xs border-yellow-500 text-yellow-700 bg-yellow-50 flex items-center">
-              <WifiOff className="w-3 h-3 mr-1 animate-pulse" />
-              Reconnecting...
             </Badge>
           ) : (
             <Badge variant="outline" className="text-xs border-red-500 text-red-700 bg-red-50 flex items-center">
