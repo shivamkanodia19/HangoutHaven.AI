@@ -19,14 +19,15 @@ export function useProgressPersistence(sessionId: string) {
   // Save progress
   const saveProgress = useCallback(
     (round: number, currentIndex: number, deckIds: string[]) => {
+      const progress: ProgressData = {
+        sessionId,
+        round,
+        currentIndex,
+        deck: deckIds,
+        timestamp: Date.now(),
+      };
+      
       try {
-        const progress: ProgressData = {
-          sessionId,
-          round,
-          currentIndex,
-          deck: deckIds,
-          timestamp: Date.now(),
-        };
         sessionStorage.setItem(storageKey, JSON.stringify(progress));
       } catch (error) {
         console.error('Failed to save progress to sessionStorage:', error);

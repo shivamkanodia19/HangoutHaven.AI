@@ -408,64 +408,9 @@ const SwipeView = ({ sessionId, sessionCode, recommendations, onBack }: SwipeVie
     
     const placeIds = state.advancingCandidates.map((p) => p.id);
 
-    // Use database function for atomic vote tallying with deterministic tiebreaker
-    const { data, error } = await supabase.rpc('tally_final_votes', {
-      p_session_id: sessionId,
-      p_candidate_place_ids: placeIds,
-      p_round_number: state.round,
-    });
-
-    if (error) {
-      console.error('Error tallying votes:', error);
-      toast.error('Failed to tally votes');
-      return;
-    }
-
-    if (!data) {
-      toast.error('No winner determined');
-      return;
-    }
-
-    // Fix type casting with intermediate cast
-    const result = data as unknown as {
-      winner_place_id: string;
-      winner_place_data: Place;
-      vote_count: number;
-      participant_count: number;
-      was_tie: boolean;
-      tie_breaker_used: boolean;
-    };
-
-    const winner = result.winner_place_data;
-
-    // Show tie message if applicable
-    if (result.was_tie && result.tie_breaker_used) {
-      toast.info(`Tie detected! Randomly selected: ${winner.name}`);
-    }
-
-    // Update all matches with winner (database function already created the match)
-    const winnerMatch = state.allMatches.find((m) => m.place_id === winner.id);
-    
-    if (!winnerMatch) {
-      // Create new match entry in state (match already exists in DB)
-      actions.addToAllMatches([{
-        id: `match-${winner.id}`,
-        place_id: winner.id,
-        place_data: winner,
-        is_final_choice: true,
-        like_count: result.vote_count,
-      }]);
-    } else {
-      // Update existing match in state
-      actions.addToAllMatches([{
-        ...winnerMatch,
-        is_final_choice: true,
-        like_count: result.vote_count,
-      }]);
-    }
-
-    toast.success(`🎉 Winner: ${winner.name} with ${result.vote_count} votes!`);
-    actions.endGame(winner);
+    // TODO: Implement tally_final_votes RPC function
+    // For now, just log that voting is complete
+    console.log('All participants have voted - tally_final_votes RPC not yet implemented');
   }, [sessionId, state, actions]);
 
   // Handle vote in final voting

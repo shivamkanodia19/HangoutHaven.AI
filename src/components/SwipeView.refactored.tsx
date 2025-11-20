@@ -139,10 +139,6 @@ const SwipeView = ({ sessionId, sessionCode, recommendations, onBack }: SwipeVie
         return;
       }
 
-      if (!data || !data.completed) {
-        return;
-      }
-
       const result = data as {
         completed: boolean;
         participant_count: number;
@@ -154,6 +150,10 @@ const SwipeView = ({ sessionId, sessionCode, recommendations, onBack }: SwipeVie
         }>;
         eliminated_place_ids?: string[];
       };
+      
+      if (!result || !result.completed) {
+        return;
+      }
 
       // Update participant count
       if (result.participant_count !== state.participantCount) {
@@ -350,7 +350,7 @@ const SwipeView = ({ sessionId, sessionCode, recommendations, onBack }: SwipeVie
           return {
             id: match.id,
             place_id: match.place_id,
-            place_data: match.place_data as Place,
+            place_data: match.place_data as unknown as Place,
             is_final_choice: match.is_final_choice,
             like_count: count || 0,
           };
@@ -625,9 +625,9 @@ const SwipeView = ({ sessionId, sessionCode, recommendations, onBack }: SwipeVie
         p_round_number: state.round,
       });
 
-      if (data && data.completed) {
+      const result = data as any;
+      if (result && result.completed) {
         // Process same as normal round completion
-        const result = data as any;
         const roundMatches: Match[] = result.unanimous_matches
           .map((placeId: string) => {
             const place = state.deck.find((p) => p.id === placeId);
