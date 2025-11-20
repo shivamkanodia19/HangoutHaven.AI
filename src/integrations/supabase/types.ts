@@ -80,6 +80,47 @@ export type Database = {
         }
         Relationships: []
       }
+      round_results: {
+        Row: {
+          advancing_place_ids: string[] | null
+          completed_at: string | null
+          created_at: string | null
+          deck_place_ids: string[]
+          eliminated_place_ids: string[] | null
+          round_number: number
+          session_id: string
+          unanimous_matches: string[] | null
+        }
+        Insert: {
+          advancing_place_ids?: string[] | null
+          completed_at?: string | null
+          created_at?: string | null
+          deck_place_ids: string[]
+          eliminated_place_ids?: string[] | null
+          round_number: number
+          session_id: string
+          unanimous_matches?: string[] | null
+        }
+        Update: {
+          advancing_place_ids?: string[] | null
+          completed_at?: string | null
+          created_at?: string | null
+          deck_place_ids?: string[]
+          eliminated_place_ids?: string[] | null
+          round_number?: number
+          session_id?: string
+          unanimous_matches?: string[] | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "round_results_session_id_fkey"
+            columns: ["session_id"]
+            isOneToOne: false
+            referencedRelation: "sessions"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       session_matches: {
         Row: {
           created_at: string
@@ -200,6 +241,7 @@ export type Database = {
           started_at: string | null
           status: string
           updated_at: string
+          version: number
         }
         Insert: {
           activities?: string | null
@@ -215,6 +257,7 @@ export type Database = {
           started_at?: string | null
           status?: string
           updated_at?: string
+          version?: number
         }
         Update: {
           activities?: string | null
@@ -230,6 +273,7 @@ export type Database = {
           started_at?: string | null
           status?: string
           updated_at?: string
+          version?: number
         }
         Relationships: []
       }
@@ -272,6 +316,7 @@ export type Database = {
           started_at: string | null
           status: string
           updated_at: string
+          version: number
         }
         SetofOptions: {
           from: "*"
