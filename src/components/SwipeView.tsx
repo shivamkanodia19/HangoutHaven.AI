@@ -16,7 +16,6 @@ import { WaitingForPlayers } from "./swipe/WaitingForPlayers";
 import { Confetti } from "./Confetti";
 import { useRealtimeSync } from "@/hooks/useRealtimeSync";
 import { useRoundCompletion } from "@/hooks/useRoundCompletion";
-import { useProgressPersistence } from "@/hooks/useProgressPersistence";
 import { RoundCompletionResult } from "@/types/game";
 
 interface SwipeViewProps {
@@ -28,39 +27,7 @@ interface SwipeViewProps {
 
 const SwipeView = ({ sessionId, sessionCode, recommendations, onBack }: SwipeViewProps) => {
   const { state, actions } = useSwipeGameState(recommendations);
-  const { saveProgress, loadProgress, clearProgress } = useProgressPersistence(sessionId);
   const hasVotedRef = useRef(false);
-
-  // Initialize deck when recommendations change
-  useEffect(() => {
-    if (recommendations.length > 0 && state.deck.length === 0) {
-      // Try to load saved progress
-      const savedProgress = loadProgress();
-      if (savedProgress && savedProgress.deck.length > 0) {
-        // Restore saved progress if available
-        actions.setDeck(recommendations.filter(p => savedProgress.deck.includes(p.id)));
-        actions.setRound(savedProgress.round);
-        actions.setIndex(savedProgress.currentIndex);
-        toast.info(`Restored progress from round ${savedProgress.round}`);
-      } else {
-        actions.setDeck(recommendations);
-      }
-    }
-  }, [recommendations, state.deck.length, actions, loadProgress]);
-
-  // Save progress whenever it changes
-  useEffect(() => {
-    if (state.deck.length > 0 && !state.gameEnded && !state.showRoundSummary) {
-      saveProgress(state.round, state.currentIndex, state.deck.map(p => p.id));
-    }
-  }, [state.round, state.currentIndex, state.deck, state.gameEnded, state.showRoundSummary, saveProgress]);
-
-  // Clear progress on game end
-  useEffect(() => {
-    if (state.gameEnded) {
-      clearProgress();
-    }
-  }, [state.gameEnded, clearProgress]);
 
   // Load participants and check if user is host
   useEffect(() => {
@@ -650,6 +617,17 @@ const SwipeView = ({ sessionId, sessionCode, recommendations, onBack }: SwipeVie
   const currentPlace = state.deck[state.currentIndex];
   const progressPercent = state.deck.length > 0 ? (state.currentIndex / state.deck.length) * 100 : 0;
 
+  // Handle back button with confirmation
+  const handleBack = useCallback(() => {
+    if (!state.gameEnded) {
+      const confirmed = window.confirm(
+        "Are you sure you want to leave? Your progress in this session will be lost and other players are waiting for you!"
+      );
+      if (!confirmed) return;
+    }
+    onBack();
+  }, [state.gameEnded, onBack]);
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-[hsl(200,90%,95%)] via-[hsl(320,80%,95%)] to-[hsl(340,80%,95%)] p-4 space-y-6">
       {/* Confetti for winner */}
@@ -657,7 +635,7 @@ const SwipeView = ({ sessionId, sessionCode, recommendations, onBack }: SwipeVie
 
       {/* Header */}
       <div className="flex items-center justify-between max-w-md mx-auto gap-2">
-        <Button variant="ghost" onClick={onBack}>
+        <Button variant="ghost" onClick={handleBack}>
           <ArrowLeft className="w-4 h-4 mr-2" />
           Back
         </Button>
